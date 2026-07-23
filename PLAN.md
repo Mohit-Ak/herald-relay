@@ -270,20 +270,20 @@ hermes config set herald.device_token YOUR_TOKEN_FROM_APP
 
 ## Phase 5 — Repo + brand (Day 1)
 
-- New GitHub repo: `Mohit-Ak/herald-relay` (separate from the mailmind repo)
-- Herald app stays in `mailmind` repo for now (rename the GitHub repo to `herald` per the migration doc)
+- New GitHub repo: `Mohit-Ak/herald-relay` (separate from the herald repo)
+- Herald app stays in `herald` repo for now (rename the GitHub repo to `herald` per the migration doc)
 - Plugin published to PyPI as `hermes-herald`
 - Website: `herald.app` or similar domain
 
 ---
 
-## What stays in the `mailmind` (→ `herald`) repo
+## What stays in the `herald` (→ `herald`) repo
 
 - Flutter app (updated for burst model)
 - Pion Go sidecar (reused — WebRTC media plane doesn't change)
 - Herald backend → **becomes thin relay proxy** (most logic moves to `herald-relay`)
 
-The GCE `mailmind-rtc` box runs:
+The GCE `herald-rtc` box runs:
 1. The Pion sidecar (WebRTC media plane — burst sessions)
 2. The relay backend (replaces the current Herald backend)
 
