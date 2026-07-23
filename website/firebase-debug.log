@@ -1,0 +1,71 @@
+[debug] [2026-07-23T19:59:29.886Z] ----------------------------------------------------------------------
+[debug] [2026-07-23T19:59:29.888Z] Command:       /usr/bin/node /home/mohit/.npm-global/bin/firebase deploy --only hosting --project eh-voice-ai --token ya29.c.c0AZ4bNpZaB4udlZYn7Hgy-iYM-XqJA5XrTcqAz73kblv_ttpBc5lwDe-9_4KL-Xx1dal8FYF3iMDJ29Bq7rFkRiEq1tnpnENTopv7mHJNHGDva_adX4se1lagtLelCpCkah6tf77UWRrAhY7jDqqriwAvTKLcuUT2MqBprQaNB1L4cRIRpKiFseVKVZM9XqhqOjHTS6pIA1kKtGajnrzCh1b2WDoWjUodScGFe0Esf9BLlIYWkgPy6pgtYz-W-xQGxexZCY1MlZPe_tsbR7y8NT-yUZ3d5M6_UHiWMuDmKv7bbBi3GFWT-3LcDgU3vVlcYskBt3tLhI7TVEKvX4oeGtw993VGplR4iJRvc727y03xV3knDZzNn6n04d1UfMw6gDc95X0G400ABsSl-S0nwWcp2rJ801Xiruy8qh1o5tJBnIgRtY_Wx04rgZk4UfxS4sz0Wx_g95Mg2JVbuhxzSwbd_v3VmmkFwbIuyZqeVcvga95xQl4X25i7dmx70XFB0qJ91tZ4uUMiw4qt7knlpkFz89k4emvZRnZS4JSe4Xp8nFJF0pVI0yobjUo5Y8vUbxUeXpJ5_Yl80U83r6Wpomh68Qgrmd-Vyg7FRxY5vglMldhnzjq7Be2OmZsOOdj8o1jJImOBSrMoFnwSMx6XcFQRtv4sBlzun5adkvmj8giXqZb_YwFi9S9i6lWkvxxi5m5-2mgiV6xR0mBckXBuIjF303jIs8uFg-SY7c4O6mcXIR0yRgaXiS5O2wJw7FS3UBa1eFXpM7icaFskpM38nhkal7VVj2tj9ymgdFMJ_UFFQXv12cbSh1k6SSWrsFXZVlfrIpWf2YxBuqtUqRUBsp4okYYg5mJ_04WYZqr-qZZ8Xkf-lavfY8i48qJu9SOk6QplyMMWg2RnovU_1cJt96jnSkdqixq_u2S_Wnma25hJ4cocReIhFYtzV_kOmo28U_bn7Z-gQkWY38o1UZZsS3inoeZrQJtbtVBJYwJtVnBr1Zm2_eydprc
+[debug] [2026-07-23T19:59:29.889Z] CLI Version:   15.24.0
+[debug] [2026-07-23T19:59:29.889Z] Platform:      linux
+[debug] [2026-07-23T19:59:29.889Z] Node Version:  v22.22.2
+[debug] [2026-07-23T19:59:29.889Z] Detected Agent: unknown
+[debug] [2026-07-23T19:59:29.889Z] Time:          Thu Jul 23 2026 15:59:29 GMT-0400 (Eastern Daylight Time)
+[debug] [2026-07-23T19:59:29.890Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-07-23T19:59:30.847Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-07-23T19:59:30.847Z] > authorizing via --token option
+[warn] ⚠  Authenticating with `--token` is deprecated and will be removed in a future major version of `firebase-tools`. Instead, use a service account key with `GOOGLE_APPLICATION_CREDENTIALS`: https://cloud.google.com/docs/authentication/getting-started 
+[debug] [2026-07-23T19:59:30.847Z] [iam] checking project eh-voice-ai for permissions ["firebase.projects.get","firebasehosting.sites.update"]
+[debug] [2026-07-23T19:59:30.858Z] No OAuth tokens found
+[debug] [2026-07-23T19:59:30.858Z] No OAuth tokens found
+[debug] [2026-07-23T19:59:30.859Z] > refreshing access token with scopes: []
+[debug] [2026-07-23T19:59:30.861Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-07-23T19:59:30.861Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-23T19:59:31.002Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 400
+[debug] [2026-07-23T19:59:31.002Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-23T19:59:31.003Z] >>> [apiv2][query] POST https://cloudresourcemanager.googleapis.com/v1/projects/eh-voice-ai:testIamPermissions [none]
+[debug] [2026-07-23T19:59:31.003Z] >>> [apiv2][(partial)header] POST https://cloudresourcemanager.googleapis.com/v1/projects/eh-voice-ai:testIamPermissions  x-goog-user-project=eh-voice-ai
+[debug] [2026-07-23T19:59:31.003Z] >>> [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/eh-voice-ai:testIamPermissions {"permissions":["firebase.projects.get","firebasehosting.sites.update"]}
+[debug] [2026-07-23T19:59:31.294Z] <<< [apiv2][status] POST https://cloudresourcemanager.googleapis.com/v1/projects/eh-voice-ai:testIamPermissions 200
+[debug] [2026-07-23T19:59:31.295Z] <<< [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/eh-voice-ai:testIamPermissions {"permissions":["firebase.projects.get","firebasehosting.sites.update"]}
+[debug] [2026-07-23T19:59:31.295Z] No OAuth tokens found
+[debug] [2026-07-23T19:59:31.296Z] No OAuth tokens found
+[debug] [2026-07-23T19:59:31.296Z] > refreshing access token with scopes: []
+[debug] [2026-07-23T19:59:31.296Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-07-23T19:59:31.296Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-23T19:59:31.369Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 400
+[debug] [2026-07-23T19:59:31.370Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-07-23T19:59:31.370Z] >>> [apiv2][query] GET https://firebase.googleapis.com/v1beta1/projects/eh-voice-ai [none]
+[debug] [2026-07-23T19:59:31.521Z] <<< [apiv2][status] GET https://firebase.googleapis.com/v1beta1/projects/eh-voice-ai 403
+[debug] [2026-07-23T19:59:31.521Z] <<< [apiv2][body] GET https://firebase.googleapis.com/v1beta1/projects/eh-voice-ai {"error":{"code":403,"message":"Firebase Management API has not been used in project 354590356901 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firebase.googleapis.com/overview?project=354590356901 then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"SERVICE_DISABLED","domain":"googleapis.com","metadata":{"consumer":"projects/354590356901","serviceTitle":"Firebase Management API","containerInfo":"354590356901","service":"firebase.googleapis.com","activationUrl":"https://console.developers.google.com/apis/api/firebase.googleapis.com/overview?project=354590356901"}},{"@type":"type.googleapis.com/google.rpc.LocalizedMessage","locale":"en-US","message":"Firebase Management API has not been used in project 354590356901 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firebase.googleapis.com/overview?project=354590356901 then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry."},{"@type":"type.googleapis.com/google.rpc.Help","links":[{"description":"Google developers console API activation","url":"https://console.developers.google.com/apis/api/firebase.googleapis.com/overview?project=354590356901"}]}]}}
+[debug] [2026-07-23T19:59:31.522Z] Request to https://firebase.googleapis.com/v1beta1/projects/eh-voice-ai had HTTP Error: 403, Firebase Management API has not been used in project 354590356901 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firebase.googleapis.com/overview?project=354590356901 then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.
+[debug] [2026-07-23T19:59:31.523Z] FirebaseError: Request to https://firebase.googleapis.com/v1beta1/projects/eh-voice-ai had HTTP Error: 403, Firebase Management API has not been used in project 354590356901 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firebase.googleapis.com/overview?project=354590356901 then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.
+    at responseToError (/home/mohit/.npm-global/lib/node_modules/firebase-tools/lib/responseToError.js:53:12)
+    at RetryOperation._fn (/home/mohit/.npm-global/lib/node_modules/firebase-tools/lib/apiv2.js:415:77)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[error] 
+[error] Error: Failed to get Firebase project eh-voice-ai. Please make sure the project exists and your account has permission to access it.
+[debug] [2026-07-23T20:02:38.930Z] ----------------------------------------------------------------------
+[debug] [2026-07-23T20:02:38.933Z] Command:       /usr/bin/node /home/mohit/.npm/_npx/ba4f1959e38407b5/node_modules/.bin/firebase deploy --only hosting --project eh-voice-ai --non-interactive
+[debug] [2026-07-23T20:02:38.933Z] CLI Version:   15.24.0
+[debug] [2026-07-23T20:02:38.933Z] Platform:      linux
+[debug] [2026-07-23T20:02:38.933Z] Node Version:  v22.22.2
+[debug] [2026-07-23T20:02:38.934Z] Detected Agent: unknown
+[debug] [2026-07-23T20:02:38.934Z] Time:          Thu Jul 23 2026 16:02:38 GMT-0400 (Eastern Daylight Time)
+[debug] [2026-07-23T20:02:38.934Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-07-23T20:02:39.942Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-07-23T20:02:40.124Z] Running auto auth
+[debug] [2026-07-23T20:02:40.124Z] [iam] checking project eh-voice-ai for permissions ["firebase.projects.get","firebasehosting.sites.update"]
+[debug] [2026-07-23T20:02:40.126Z] No OAuth tokens found
+[debug] [2026-07-23T20:02:40.127Z] >>> [apiv2][query] POST https://cloudresourcemanager.googleapis.com/v1/projects/eh-voice-ai:testIamPermissions [none]
+[debug] [2026-07-23T20:02:40.127Z] >>> [apiv2][(partial)header] POST https://cloudresourcemanager.googleapis.com/v1/projects/eh-voice-ai:testIamPermissions  x-goog-user-project=eh-voice-ai
+[debug] [2026-07-23T20:02:40.127Z] >>> [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/eh-voice-ai:testIamPermissions {"permissions":["firebase.projects.get","firebasehosting.sites.update"]}
+[debug] [2026-07-23T20:02:40.413Z] <<< [apiv2][status] POST https://cloudresourcemanager.googleapis.com/v1/projects/eh-voice-ai:testIamPermissions 200
+[debug] [2026-07-23T20:02:40.413Z] <<< [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/eh-voice-ai:testIamPermissions {"permissions":["firebase.projects.get","firebasehosting.sites.update"]}
+[debug] [2026-07-23T20:02:40.414Z] No OAuth tokens found
+[debug] [2026-07-23T20:02:40.414Z] >>> [apiv2][query] GET https://firebase.googleapis.com/v1beta1/projects/eh-voice-ai [none]
+[debug] [2026-07-23T20:02:40.588Z] <<< [apiv2][status] GET https://firebase.googleapis.com/v1beta1/projects/eh-voice-ai 403
+[debug] [2026-07-23T20:02:40.588Z] <<< [apiv2][body] GET https://firebase.googleapis.com/v1beta1/projects/eh-voice-ai {"error":{"code":403,"message":"Firebase Management API has not been used in project 354590356901 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firebase.googleapis.com/overview?project=354590356901 then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"SERVICE_DISABLED","domain":"googleapis.com","metadata":{"service":"firebase.googleapis.com","containerInfo":"354590356901","serviceTitle":"Firebase Management API","activationUrl":"https://console.developers.google.com/apis/api/firebase.googleapis.com/overview?project=354590356901","consumer":"projects/354590356901"}},{"@type":"type.googleapis.com/google.rpc.LocalizedMessage","locale":"en-US","message":"Firebase Management API has not been used in project 354590356901 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firebase.googleapis.com/overview?project=354590356901 then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry."},{"@type":"type.googleapis.com/google.rpc.Help","links":[{"description":"Google developers console API activation","url":"https://console.developers.google.com/apis/api/firebase.googleapis.com/overview?project=354590356901"}]}]}}
+[debug] [2026-07-23T20:02:40.589Z] Request to https://firebase.googleapis.com/v1beta1/projects/eh-voice-ai had HTTP Error: 403, Firebase Management API has not been used in project 354590356901 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firebase.googleapis.com/overview?project=354590356901 then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.
+[debug] [2026-07-23T20:02:40.590Z] FirebaseError: Request to https://firebase.googleapis.com/v1beta1/projects/eh-voice-ai had HTTP Error: 403, Firebase Management API has not been used in project 354590356901 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/firebase.googleapis.com/overview?project=354590356901 then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.
+    at responseToError (/home/mohit/.npm/_npx/ba4f1959e38407b5/node_modules/firebase-tools/lib/responseToError.js:53:12)
+    at RetryOperation._fn (/home/mohit/.npm/_npx/ba4f1959e38407b5/node_modules/firebase-tools/lib/apiv2.js:415:77)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+[error] 
+[error] Error: Failed to get Firebase project eh-voice-ai. Please make sure the project exists and your account has permission to access it.
