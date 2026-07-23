@@ -3,7 +3,7 @@ name: Deploy Relay Backend
 on:
   push:
     branches:
-      - master
+      - main
     paths:
       - 'backend/**'
 
