@@ -16,6 +16,7 @@ load_dotenv()  # Load .env before anything else imports os.environ
 from routers import billing, push, relay  # noqa: E402
 from routers import hermes_proxy  # noqa: E402
 from services.relay_manager import relay_manager  # noqa: E402
+from services.firestore_client import get_db  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +28,11 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Herald Relay starting up …")
+    try:
+        get_db()  # warm up Firestore connection
+        logger.info("Firestore connected")
+    except Exception as e:
+        logger.warning(f"Firestore not available (will retry on first request): {e}")
     yield
     logger.info("Herald Relay shutting down …")
 

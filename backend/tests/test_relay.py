@@ -47,9 +47,6 @@ async def test_relay_manager_connected_count():
 
 @pytest.fixture
 def app():
-    # Reset device store before each test
-    import routers.push as push_mod
-    push_mod._devices.clear()
     from main import app
     return app
 
