@@ -1,15 +1,17 @@
 """
-End-to-end test for Herald Relay system.
+End-to-end test for the Herald Relay pipeline (no external deps):
 
-Tests the full flow:
-1. Start relay server (uvicorn on port 19876)
-2. Plugin connects via WS /relay/connect and registers
-3. Register device_token with FCM stub via POST /push/register
-4. HTTP client calls POST /hermes/v1/runs — relayed to plugin WS
-5. Plugin receives forward_request and sends back forward_response
-6. HTTP response verified
-7. POST /push/send verified (FCM stub)
-8. GET /health shows connected_devices: 1
+  Flow:
+    1. Start relay server (uvicorn on 19876)
+    2. Start mock-Hermes (uvicorn on 19877) — always returns a tool_end then final
+    3. Register device_token via POST /push/register
+    4. Plugin connects: POST /tunnel/connect
+    5. POST /tunnel/dispatch — injects an A2A task into the relay
+    6. Plugin polls /tunnel/events (SSE) and picks up the task
+    7. Plugin posts run to mock-Hermes → gets SSE events back
+    8. Plugin POSTs classified updates to /tunnel/update
+    9. Flutter monitor: GET /monitor/{token}/{run_id} receives DONE via SSE
+   10. Assert final signal == DONE received by monitor within 15s
 """
 from __future__ import annotations
 
@@ -19,210 +21,266 @@ import os
 import subprocess
 import sys
 import time
+import uuid
+from pathlib import Path
 
 import httpx
 import pytest
-import websockets
 
-BASE_URL = "http://localhost:19876"
-WS_URL = "ws://localhost:19876/relay/connect"
-DEVICE_TOKEN = "e2e-test-device-token-abc123"
-SERVER_PORT = 19876
+RELAY_PORT = 19876
+MOCK_HERMES_PORT = 19877
+BASE_RELAY = f"http://localhost:{RELAY_PORT}"
+BASE_HERMES = f"http://localhost:{MOCK_HERMES_PORT}"
+PLUGIN_DIR = Path(__file__).parent.parent / "plugin"
+BACKEND_DIR = Path(__file__).parent.parent / "backend"
 
+# ── helpers ────────────────────────────────────────────────────────────────
 
-def wait_for_server(timeout: float = 15.0) -> bool:
-    """Poll until the server is up or timeout."""
-    import urllib.request
+def _poll_until(url: str, timeout: float = 15.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            urllib.request.urlopen(f"http://localhost:{SERVER_PORT}/health", timeout=1)
-            return True
+            r = httpx.get(url, timeout=1)
+            if r.status_code == 200:
+                return True
         except Exception:
-            time.sleep(0.2)
+            pass
+        time.sleep(0.2)
     return False
 
 
-@pytest.fixture(scope="module")
-def relay_server():
-    """Start uvicorn relay server in a subprocess for the duration of the test module."""
+def _make_mock_hermes_app():
+    """Tiny FastAPI app that mimics enough of the Hermes API for tests."""
+    from fastapi import FastAPI
+    from fastapi.responses import StreamingResponse
+    import asyncio
+
+    app = FastAPI()
+    _run_ids: dict = {}
+
+    @app.get("/health")
+    def health():
+        return {"ok": True}
+
+    @app.post("/v1/runs")
+    async def start_run(body: dict = None):
+        run_id = str(uuid.uuid4())
+        return {"run_id": run_id, "status": "running"}
+
+    @app.get("/v1/runs/{run_id}/events")
+    async def run_events(run_id: str):
+        async def gen():
+            # emit tool_end then final
+            yield f"data: {json.dumps({'type': 'tool_end', 'data': {'name': 'read_file'}})}\n\n"
+            await asyncio.sleep(0.05)
+            yield f"data: {json.dumps({'type': 'final', 'data': {'summary': 'All done via mock.'}})}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @app.post("/api/sessions")
+    async def create_session():
+        return {"session_id": str(uuid.uuid4())}
+
+    return app
+
+
+# ── fixtures ───────────────────────────────────────────────────────────────
+
+def _start_relay():
     from cryptography.fernet import Fernet
     key = Fernet.generate_key().decode()
-
     env = {
         **os.environ,
         "ENCRYPTION_KEY": key,
-        "HERALD_RELAY_URL": f"http://localhost:{SERVER_PORT}",
-        "FCM_PROJECT_ID": "",  # force stub mode
+        "HERALD_RELAY_URL": BASE_RELAY,
+        "FCM_PROJECT_ID": "",  # stub mode
+        "PORT": str(RELAY_PORT),
     }
-
     proc = subprocess.Popen(
         [
             sys.executable, "-m", "uvicorn",
             "main:app",
             "--host", "0.0.0.0",
-            "--port", str(SERVER_PORT),
+            "--port", str(RELAY_PORT),
             "--log-level", "warning",
         ],
-        cwd=os.path.join(os.path.dirname(__file__), "..", "backend"),
+        cwd=str(BACKEND_DIR),
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    return proc
 
-    ready = wait_for_server(15.0)
-    if not ready:
-        proc.kill()
-        out, err = proc.communicate(timeout=5)
-        raise RuntimeError(
-            f"Relay server failed to start.\nstdout: {out.decode()}\nstderr: {err.decode()}"
-        )
 
-    yield proc
+def _start_mock_hermes():
+    """Write a tiny server file and launch it."""
+    mock_src = Path("/tmp/mock_hermes_server.py")
+    mock_src.write_text(
+        """
+import uuid, json, asyncio
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+import uvicorn
 
-    proc.terminate()
+app = FastAPI()
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+@app.post("/v1/runs")
+async def start_run(body: dict = None):
+    return {"run_id": str(uuid.uuid4())}
+
+@app.get("/v1/runs/{run_id}/events")
+async def events(run_id: str):
+    async def gen():
+        yield "data: " + json.dumps({"type": "tool_end", "data": {"name": "read_file"}}) + "\\n\\n"
+        await asyncio.sleep(0.05)
+        yield "data: " + json.dumps({"type": "final", "data": {"summary": "Mock done."}}) + "\\n\\n"
+        yield "data: [DONE]\\n\\n"
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+@app.post("/api/sessions")
+async def sessions():
+    return {"session_id": str(uuid.uuid4())}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=19877, log_level="warning")
+"""
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(mock_src)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return proc
+
+
+@pytest.fixture(scope="module")
+def servers():
+    relay_proc = _start_relay()
+    hermes_proc = _start_mock_hermes()
+
+    assert _poll_until(f"{BASE_RELAY}/health", 15), "Relay server failed to start"
+    assert _poll_until(f"{BASE_HERMES}/health", 10), "Mock Hermes failed to start"
+
+    yield
+
+    relay_proc.terminate()
+    hermes_proc.terminate()
     try:
-        proc.wait(timeout=5)
+        relay_proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        relay_proc.kill()
+    try:
+        hermes_proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        hermes_proc.kill()
 
+
+# ── the e2e test ────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_full_e2e(relay_server):
-    """Full end-to-end Herald Relay test."""
+async def test_e2e_full_pipeline(servers):
+    """
+    Full pipeline: register → plugin connects → relay dispatches task →
+    plugin runs mock-Hermes → classifies → updates relay → Flutter monitor
+    receives DONE.
+    """
+    import sys
+    sys.path.insert(0, str(PLUGIN_DIR))
+    from herald_relay.relay_client import HeraldRelayClient
 
-    # -----------------------------------------------------------------------
-    # 1. Plugin connects via WebSocket
-    # -----------------------------------------------------------------------
-    async with websockets.connect(WS_URL) as ws:
-        # Send register message
-        register_msg = {
-            "type": "register",
-            "device_token": DEVICE_TOKEN,
-            "hermes_version": "0.1.0-test",
-        }
-        await ws.send(json.dumps(register_msg))
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        # 1. Register device
+        reg = await http.post(f"{BASE_RELAY}/push/register", json={"fcm_token": "e2e-fcm"})
+        assert reg.status_code == 200, reg.text
+        token = reg.json()["device_token"]
 
-        # Receive 'registered' ack
-        raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
-        ack = json.loads(raw)
-        assert ack["type"] == "registered", f"Expected registered, got: {ack}"
-        relay_id = ack["relay_id"]
-        assert relay_id, "relay_id should be non-empty"
+        # 2. Plugin connect
+        conn = await http.post(f"{BASE_RELAY}/tunnel/connect", json={
+            "device_token": token,
+            "agent_card": {"name": "E2EAgent"},
+            "hermes_version": "0.1.0-e2e",
+        })
+        assert conn.status_code == 200, conn.text
 
-        # -----------------------------------------------------------------------
-        # 2. Register device_token with FCM stub
-        # -----------------------------------------------------------------------
-        async with httpx.AsyncClient(base_url=BASE_URL) as http:
-            resp = await http.post("/push/register", json={
-                "device_token": DEVICE_TOKEN,
-                "fcm_token": "stub-fcm-token-abc123",
-                "platform": "android",
-                "plan": "byok",
+    # 3. Start the relay plugin client in background
+    client = HeraldRelayClient(
+        relay_url=BASE_RELAY,
+        device_token=token,
+        local_hermes_url=BASE_HERMES,
+    )
+    plugin_task = asyncio.create_task(client.run_forever())
+
+    try:
+        # Give plugin more time to subscribe to SSE stream
+        await asyncio.sleep(1.5)
+
+        run_id = str(uuid.uuid4())
+        task_id = str(uuid.uuid4())
+        import datetime
+
+        # 4. Dispatch an A2A task into the relay (simulate Cloud→Plugin)
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            dispatch = await http.post(f"{BASE_RELAY}/tunnel/dispatch", json={
+                "device_token": token,
+                "task": {
+                    "task_id": task_id,
+                    "device_token": token,
+                    "run_id": run_id,
+                    "command": "echo hello world",
+                    "created_at": datetime.datetime.utcnow().isoformat(),
+                    "status": "pending",
+                },
             })
-            assert resp.status_code == 200, f"push/register failed: {resp.text}"
-            reg_data = resp.json()
-            assert reg_data["device_token"] == DEVICE_TOKEN
+            # 202 accepted or 200
+            assert dispatch.status_code in (200, 202), dispatch.text
 
-        # -----------------------------------------------------------------------
-        # 3. Check /health shows connected_devices: 1
-        # -----------------------------------------------------------------------
-        async with httpx.AsyncClient(base_url=BASE_URL) as http:
-            resp = await http.get("/health")
-            assert resp.status_code == 200
-            health = resp.json()
-            assert health["connected_devices"] >= 1, f"Expected >=1 connected device: {health}"
+        # 5. Monitor for DONE on the Flutter SSE endpoint
+        done_received = asyncio.Event()
 
-        # -----------------------------------------------------------------------
-        # 4. HTTP client calls POST /hermes/v1/runs
-        #    Plugin must receive forward_request and respond
-        # -----------------------------------------------------------------------
+        async def _monitor():
+            url = f"{BASE_RELAY}/monitor/{token}/{run_id}"
+            deadline = time.monotonic() + 12.0
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15, read=15)) as mc:
+                async with mc.stream("GET", url) as resp:
+                    async for line in resp.aiter_lines():
+                        if time.monotonic() > deadline:
+                            break
+                        if not line or line.startswith(":"):
+                            continue
+                        if line.startswith("data:"):
+                            raw = line[5:].strip()
+                            if raw == "[DONE]":
+                                break
+                            try:
+                                ev = json.loads(raw)
+                                if ev.get("signal") == "DONE":
+                                    done_received.set()
+                                    return
+                            except Exception:
+                                pass
 
-        run_body = {"input": "hello from test", "model": "test-model"}
+        monitor_task = asyncio.create_task(_monitor())
+        # Wait up to 12s for DONE
+        try:
+            await asyncio.wait_for(done_received.wait(), timeout=12.0)
+        finally:
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
-        async def plugin_handler():
-            """Listen for forward_request and send back forward_response."""
-            for _ in range(10):
-                raw_msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
-                msg = json.loads(raw_msg)
-                if msg["type"] == "forward_request":
-                    # Send forward_response
-                    response = {
-                        "type": "forward_response",
-                        "request_id": msg["request_id"],
-                        "status": 200,
-                        "body": {"run_id": "run-test-42", "status": "queued"},
-                        "headers": {},
-                    }
-                    await ws.send(json.dumps(response))
-                    return msg
-                elif msg["type"] == "ping":
-                    await ws.send(json.dumps({"type": "pong"}))
-                    continue
-            raise AssertionError("Never received forward_request")
+        assert done_received.is_set(), "Flutter monitor never received DONE signal within 12s"
 
-        async def http_caller():
-            """Call POST /hermes/v1/runs and collect SSE response."""
-            async with httpx.AsyncClient(base_url=BASE_URL, timeout=15.0) as http:
-                chunks = []
-                async with http.stream(
-                    "POST",
-                    "/hermes/v1/runs",
-                    json=run_body,
-                    headers={"X-Device-Token": DEVICE_TOKEN},
-                ) as response:
-                    assert response.status_code == 200, f"Expected 200: {response.status_code}"
-                    async for line in response.aiter_lines():
-                        if line:
-                            chunks.append(line)
-                return chunks
-
-        # Run both concurrently
-        results = await asyncio.gather(plugin_handler(), http_caller())
-        forward_req_msg, sse_chunks = results
-
-        # -----------------------------------------------------------------------
-        # 5. Verify the forwarded request and response
-        # -----------------------------------------------------------------------
-        assert forward_req_msg["method"] == "POST"
-        assert forward_req_msg["path"] == "/v1/runs"
-        assert forward_req_msg["body"] == run_body
-
-        # SSE chunks should contain the response body
-        assert len(sse_chunks) > 0, "Expected at least one SSE chunk"
-        data_lines = [c for c in sse_chunks if c.startswith("data:")]
-        assert len(data_lines) > 0, f"Expected data: lines in SSE, got: {sse_chunks}"
-        payload = json.loads(data_lines[0].removeprefix("data:").strip())
-        assert payload.get("run_id") == "run-test-42", f"Unexpected SSE payload: {payload}"
-
-        # -----------------------------------------------------------------------
-        # 6. POST /push/send — verify FCM stub handles it
-        # -----------------------------------------------------------------------
-        async with httpx.AsyncClient(base_url=BASE_URL) as http:
-            resp = await http.post("/push/send", json={
-                "device_token": DEVICE_TOKEN,
-                "message": "Test push notification",
-                "urgency": "high",
-                "metadata": {"relay_id": relay_id},
-            })
-            assert resp.status_code == 200, f"push/send failed: {resp.text}"
-            push_data = resp.json()
-            assert push_data.get("ok") is True
-            assert push_data.get("stub") is True, "Expected FCM stub mode (no real FCM project)"
-
-        # -----------------------------------------------------------------------
-        # 7. Final health check (device still connected inside WS context)
-        # -----------------------------------------------------------------------
-        async with httpx.AsyncClient(base_url=BASE_URL) as http:
-            resp = await http.get("/health")
-            assert resp.status_code == 200
-            health = resp.json()
-            assert health["status"] == "ok"
-            assert health["connected_devices"] >= 1
-
-    # After WS context closes, device should be unregistered
-    await asyncio.sleep(0.5)
-    async with httpx.AsyncClient(base_url=BASE_URL) as http:
-        resp = await http.get("/health")
-        health = resp.json()
-        assert health["connected_devices"] == 0, f"Expected 0 after disconnect: {health}"
+    finally:
+        await client.stop()
+        plugin_task.cancel()
+        try:
+            await plugin_task
+        except (asyncio.CancelledError, Exception):
+            pass

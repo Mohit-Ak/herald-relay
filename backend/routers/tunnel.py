@@ -434,3 +434,24 @@ async def monitor_run(device_token: str, run_id: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /tunnel/dispatch  – Cloud/test injects an A2A task to a device
+# ---------------------------------------------------------------------------
+
+class DispatchRequest(BaseModel):
+    device_token: str
+    task: A2ATask
+
+
+@router.post("/dispatch", summary="Inject an A2A task to a connected plugin")
+async def tunnel_dispatch(req: DispatchRequest):
+    """
+    Used by Herald Cloud (and tests) to push a task to a plugin.
+    If online the task is enqueued on its SSE stream immediately.
+    If offline it is stored in Firestore with status=queued.
+    """
+    _require_device(req.device_token)
+    await dispatch_task(req.device_token, req.task)
+    return {"ok": True, "task_id": req.task.task_id}

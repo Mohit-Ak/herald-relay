@@ -1,314 +1,320 @@
-"""Herald Relay — outbound WebSocket client that tunnels Herald Cloud → local Hermes."""
+"""
+Herald Relay — SSE+POST tunnel client.
+
+Replaces the old WebSocket relay_client. The plugin now dials the Herald Cloud
+relay via three HTTP/SSE endpoints:
+
+  POST /tunnel/connect  — register + send AgentCard
+  GET  /tunnel/events   — long-lived SSE stream; Herald Cloud pushes A2A tasks
+  POST /tunnel/update   — classified event updates back to Cloud
+
+Reconnect: exponential back-off (1→2→4→8→30s, max 5 consecutive failures).
+Hermes event forwarding: each SSE event from the local Hermes run is classified
+via EventClassifier and POSTed to /tunnel/update.
+"""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 import re
 import time
-from typing import Any
+import uuid
+from typing import AsyncGenerator, Optional
 
 import httpx
-import websockets
-import websockets.asyncio.client as ws_asyncio
-from websockets.exceptions import ConnectionClosed, WebSocketException
 
-# websockets 13+ uses ClientConnection; fall back to a generic type for annotations
-try:
-    from websockets.asyncio.client import ClientConnection as _WSConn
-except ImportError:  # pragma: no cover
-    _WSConn = object  # type: ignore[assignment,misc]
+from .event_classifier import EventClassifier, DONE, QUESTION
 
 logger = logging.getLogger(__name__)
 
-# SSE path patterns
-_SSE_POST_PATH = "/v1/runs"
-_SSE_EVENTS_RE = re.compile(r"^/v1/runs/[^/]+/events$")
+# SSE line pattern
+_SSE_DATA_RE = re.compile(r"^data:\s*(.*)")
 
-
-def _is_sse_path(method: str, path: str) -> bool:
-    """Return True if this request will produce an SSE stream."""
-    if method.upper() == "POST" and path.rstrip("/") == _SSE_POST_PATH:
-        return True
-    if method.upper() == "GET" and _SSE_EVENTS_RE.match(path):
-        return True
-    return False
+# How long to wait for a heartbeat before considering the stream stale
+_HEARTBEAT_TIMEOUT_S = 60.0
 
 
 class HeraldRelayClient:
-    """Persistent WebSocket client that relays Herald Cloud requests to local Hermes."""
+    """SSE+POST tunnel client that connects local Hermes to Herald Cloud.
 
-    def __init__(self, relay_url: str, device_token: str, local_hermes_url: str):
-        self.relay_url = relay_url
+    Public API:
+        run_forever()       – main loop, call from asyncio.create_task()
+        stop()              – graceful shutdown
+        set_agent_card()    – update the AgentCard sent on connect/reconnect
+    """
+
+    def __init__(
+        self,
+        relay_url: str,
+        device_token: str,
+        local_hermes_url: str,
+        hermes_version: str = "0.1.0",
+    ):
+        self.relay_url = relay_url.rstrip("/")
         self.device_token = device_token
         self.local_hermes_url = local_hermes_url.rstrip("/")
+        self.hermes_version = hermes_version
 
         self._running = False
-        self._ws: Any = None
-        self._send_lock = asyncio.Lock()
+        self._agent_card: dict = {}
+        self._hermes_session_id: Optional[str] = None
+
+        # in-flight run tasks: run_id → asyncio.Task
+        self._run_tasks: dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
+    def set_agent_card(self, card: dict) -> None:
+        self._agent_card = card
+
     async def run_forever(self) -> None:
-        """Main loop: connect, handle messages, reconnect on disconnect."""
+        """Main loop: connect to SSE tunnel, handle tasks, reconnect on drop."""
         self._running = True
         backoff = 1.0
-        max_backoff = 60.0
+        max_backoff = 30.0
+        failures = 0
 
         while self._running:
             try:
-                logger.info("Connecting to Herald Relay at %s …", self.relay_url)
-                async with websockets.connect(
-                    self.relay_url,
-                    extra_headers={"Authorization": f"Bearer {self.device_token}"},
-                    ping_interval=30,
-                    ping_timeout=10,
-                ) as ws:
-                    self._ws = ws
-                    backoff = 1.0  # reset on successful connect
-                    logger.info("Connected to Herald Relay.")
-                    await self._send(ws, {"type": "register", "device_token": self.device_token})
-                    await self._message_loop(ws)
+                await self._connect_and_stream()
+                backoff = 1.0  # reset on clean exit
+                failures = 0
             except asyncio.CancelledError:
-                logger.info("HeraldRelayClient cancelled — stopping.")
+                logger.info("HeraldRelayClient: cancelled")
                 break
-            except (ConnectionClosed, WebSocketException, OSError) as exc:
-                if not self._running:
-                    break
-                logger.warning("Herald Relay disconnected: %s. Reconnecting in %.0fs …", exc, backoff)
             except Exception as exc:  # noqa: BLE001
                 if not self._running:
                     break
-                logger.exception("Unexpected error in relay loop: %s. Reconnecting in %.0fs …", exc, backoff)
-            finally:
-                self._ws = None
-
-            if not self._running:
-                break
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, max_backoff)
-
-        logger.info("HeraldRelayClient stopped.")
-
-    async def send_push_trigger(
-        self,
-        message: str,
-        urgency: str = "low",
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """Send a push notification trigger to Herald Cloud."""
-        if self._ws is None:
-            logger.warning("Cannot send push trigger — not connected to Herald Relay.")
-            return
-        payload: dict[str, Any] = {
-            "type": "push_trigger",
-            "message": message,
-            "urgency": urgency,
-        }
-        if metadata:
-            payload["metadata"] = metadata
-        try:
-            await self._send(self._ws, payload)
-            logger.debug("Push trigger sent: [%s] %s", urgency, message)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to send push trigger: %s", exc)
-
-    async def close(self) -> None:
-        """Signal the run loop to stop and close the WebSocket."""
-        self._running = False
-        if self._ws is not None:
-            try:
-                await self._ws.close()
-            except Exception:  # noqa: BLE001
-                pass
-        logger.info("HeraldRelayClient close() called.")
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    async def _message_loop(self, ws: Any) -> None:
-        """Read messages from Herald Cloud and dispatch them."""
-        async for raw in ws:
-            if not self._running:
-                break
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                logger.warning("Received non-JSON message from relay: %r", raw)
-                continue
-
-            msg_type = msg.get("type")
-            logger.debug("← relay message type=%s", msg_type)
-
-            if msg_type == "forward_request":
-                asyncio.create_task(self._handle_forward_request(ws, msg))
-            elif msg_type == "ping":
-                await self._send(ws, {"type": "pong"})
-            else:
-                logger.debug("Unhandled relay message type: %s", msg_type)
-
-    async def _handle_forward_request(
-        self, ws: Any, msg: dict
-    ) -> None:
-        """Proxy a forward_request from Herald Cloud to local Hermes."""
-        request_id: str = msg.get("request_id", "unknown")
-        method: str = msg.get("method", "GET").upper()
-        path: str = msg.get("path", "/")
-        body: dict | None = msg.get("body")
-        headers: dict = msg.get("headers", {})
-
-        url = f"{self.local_hermes_url}{path}"
-        logger.info("→ Hermes %s %s (request_id=%s)", method, path, request_id)
-
-        if _is_sse_path(method, path):
-            await self._handle_sse_request(ws, request_id, method, url, body, headers)
-        else:
-            await self._handle_regular_request(ws, request_id, method, url, body, headers)
-
-    async def _handle_regular_request(
-        self,
-        ws: Any,
-        request_id: str,
-        method: str,
-        url: str,
-        body: dict | None,
-        headers: dict,
-    ) -> None:
-        """Call local Hermes and send a single forward_response."""
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.request(
-                    method,
-                    url,
-                    json=body,
-                    headers={k: v for k, v in headers.items() if k.lower() not in ("host",)},
+                failures += 1
+                logger.warning(
+                    "Relay tunnel disconnected (attempt %d): %s. Reconnecting in %.0fs…",
+                    failures,
+                    exc,
+                    backoff,
                 )
-            resp_body: Any
-            try:
-                resp_body = response.json()
-            except Exception:
-                resp_body = response.text
+                if failures >= 5:
+                    logger.error("5 consecutive relay failures — backing off to 30s")
+                    backoff = max_backoff
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
 
-            await self._send(
-                ws,
+    async def stop(self) -> None:
+        self._running = False
+        # Cancel any in-flight run tasks
+        for task in self._run_tasks.values():
+            task.cancel()
+        self._run_tasks.clear()
+
+    # ------------------------------------------------------------------
+    # Core tunnel
+    # ------------------------------------------------------------------
+
+    async def _connect_and_stream(self) -> None:
+        """Single tunnel session: POST /connect, then GET /events."""
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=_HEARTBEAT_TIMEOUT_S, write=10.0, pool=5.0),
+        ) as client:
+            # 1. Register with Cloud
+            await self._register(client)
+
+            # 2. Stream A2A tasks
+            logger.info("Subscribed to tunnel events at %s/tunnel/events", self.relay_url)
+            async for task_payload in self._event_stream(client):
+                if not self._running:
+                    break
+                if task_payload.get("type") == "task":
+                    task = task_payload.get("task", {})
+                    task_id = task.get("task_id", str(uuid.uuid4()))
+                    command = task.get("command", "")
+                    run_id = task.get("run_id") or str(uuid.uuid4())
+                    logger.info("Received A2A task %s: %r", task_id, command[:80])
+                    # Spawn run in background so we keep reading the SSE stream
+                    t = asyncio.create_task(
+                        self._execute_and_stream(client, task_id, run_id, command)
+                    )
+                    self._run_tasks[run_id] = t
+                    t.add_done_callback(lambda ft, rid=run_id: self._run_tasks.pop(rid, None))
+
+    async def _register(self, client: httpx.AsyncClient) -> None:
+        url = f"{self.relay_url}/tunnel/connect"
+        payload = {
+            "device_token": self.device_token,
+            "agent_card": self._agent_card,
+            "hermes_version": self.hermes_version,
+        }
+        resp = await client.post(url, json=payload)
+        if resp.status_code not in (200, 201):
+            raise RuntimeError(
+                f"Tunnel connect failed {resp.status_code}: {resp.text[:200]}"
+            )
+        logger.info("Tunnel registered: %s", resp.json())
+
+    async def _event_stream(
+        self, client: httpx.AsyncClient
+    ) -> AsyncGenerator[dict, None]:
+        """Long-lived GET /tunnel/events SSE stream."""
+        url = f"{self.relay_url}/tunnel/events"
+        headers = {
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+        }
+        params = {"device_token": self.device_token}
+
+        async with client.stream("GET", url, headers=headers, params=params) as resp:
+            if resp.status_code != 200:
+                text = await resp.aread()
+                raise RuntimeError(
+                    f"SSE stream failed {resp.status_code}: {text[:200]}"
+                )
+
+            async for line in resp.aiter_lines():
+                if not self._running:
+                    break
+                if not line:
+                    continue
+                if line.startswith(": "):
+                    # heartbeat comment
+                    continue
+                m = _SSE_DATA_RE.match(line)
+                if m:
+                    raw = m.group(1).strip()
+                    if raw == "[DONE]":
+                        return
+                    try:
+                        yield json.loads(raw)
+                    except json.JSONDecodeError:
+                        logger.debug("Non-JSON SSE data: %r", raw[:100])
+
+    # ------------------------------------------------------------------
+    # Hermes run execution + event forwarding
+    # ------------------------------------------------------------------
+
+    async def _execute_and_stream(
+        self,
+        client: httpx.AsyncClient,
+        task_id: str,
+        run_id: str,
+        command: str,
+    ) -> None:
+        """Forward a command to local Hermes, classify events, POST updates back."""
+        classifier = EventClassifier()
+        seq = 0
+        start_time = time.monotonic()
+
+        try:
+            # Ensure we have a Hermes session
+            session_id = await self._ensure_session()
+
+            # POST /v1/runs — pass the relay run_id as a hint so Hermes uses it
+            run_resp = await self._hermes_post(
+                f"{self.local_hermes_url}/v1/runs",
                 {
-                    "type": "forward_response",
-                    "request_id": request_id,
-                    "status": response.status_code,
-                    "body": resp_body,
+                    "input": command,
+                    "session_id": session_id,
+                    "stream": True,
+                    "run_id": run_id,  # hint — Hermes may or may not honour it
                 },
             )
-            logger.info("← Hermes %d (request_id=%s)", response.status_code, request_id)
+            # Always use the relay-assigned run_id for updates so Flutter monitor matches
+            actual_run_id = run_id
 
-        except httpx.ConnectError as exc:
-            logger.error("Local Hermes unreachable for request %s: %s", request_id, exc)
-            await self._send_error_response(ws, request_id, 503, "Local Hermes is unreachable")
+            # Stream /v1/runs/{id}/events
+            async for raw_event in self._hermes_sse(
+                f"{self.local_hermes_url}/v1/runs/{actual_run_id}/events"
+            ):
+                classified = classifier.feed(raw_event)
+
+                update = {
+                    "device_token": self.device_token,
+                    "run_id": actual_run_id,
+                    "seq": seq,
+                    "signal": classified.signal,
+                    "event": raw_event,
+                }
+                if classified.summary:
+                    update["summary"] = classified.summary
+                if classified.spoken_text:
+                    update["spoken_text"] = classified.spoken_text
+
+                await self._post_update(client, update)
+                seq += 1
+
+                # After DONE we're finished
+                if classified.signal == DONE:
+                    break
+
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Error forwarding request %s: %s", request_id, exc)
-            await self._send_error_response(ws, request_id, 500, str(exc))
+            logger.exception("Error executing task %s: %s", task_id, exc)
+            # Send an error DONE so Cloud isn't left waiting
+            try:
+                await self._post_update(client, {
+                    "device_token": self.device_token,
+                    "run_id": run_id,
+                    "seq": seq,
+                    "signal": DONE,
+                    "event": {"type": "error", "data": {"message": str(exc)}},
+                    "summary": f"Error: {str(exc)[:200]}",
+                })
+            except Exception:
+                pass
 
-    async def _handle_sse_request(
-        self,
-        ws: Any,
-        request_id: str,
-        method: str,
-        url: str,
-        body: dict | None,
-        headers: dict,
-    ) -> None:
-        """Stream an SSE response from local Hermes back to Herald Cloud as sse_chunk messages."""
+    async def _ensure_session(self) -> str:
+        """Lazily create a Hermes session and cache it."""
+        if self._hermes_session_id:
+            return self._hermes_session_id
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            resp = await c.post(
+                f"{self.local_hermes_url}/api/sessions",
+                json={"metadata": {"source": "herald-relay-plugin"}},
+            )
+            if resp.status_code in (200, 201):
+                self._hermes_session_id = resp.json().get("session_id", str(uuid.uuid4()))
+            else:
+                # Hermes may not require a session — use a stable random ID
+                self._hermes_session_id = str(uuid.uuid4())
+        return self._hermes_session_id  # type: ignore[return-value]
+
+    async def _hermes_post(self, url: str, body: dict) -> dict:
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            resp = await c.post(url, json=body)
+            resp.raise_for_status()
+            return resp.json()
+
+    async def _hermes_sse(
+        self, url: str
+    ) -> AsyncGenerator[dict, None]:
+        """Consume a Hermes SSE event stream."""
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=5.0)
+        ) as c:
+            async with c.stream("GET", url, headers={"Accept": "text/event-stream"}) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    if line.startswith(":"):
+                        continue
+                    m = _SSE_DATA_RE.match(line)
+                    if m:
+                        raw = m.group(1).strip()
+                        if raw == "[DONE]":
+                            return
+                        try:
+                            yield json.loads(raw)
+                        except json.JSONDecodeError:
+                            pass
+
+    async def _post_update(self, client: httpx.AsyncClient, update: dict) -> None:
+        url = f"{self.relay_url}/tunnel/update"
         try:
-            async with httpx.AsyncClient(timeout=None) as client:
-                async with client.stream(
-                    method,
-                    url,
-                    json=body,
-                    headers={k: v for k, v in headers.items() if k.lower() not in ("host",)},
-                ) as response:
-                    # Notify cloud of status first
-                    await self._send(
-                        ws,
-                        {
-                            "type": "sse_start",
-                            "request_id": request_id,
-                            "status": response.status_code,
-                        },
-                    )
-
-                    if response.status_code >= 400:
-                        body_text = await response.aread()
-                        await self._send(
-                            ws,
-                            {
-                                "type": "sse_end",
-                                "request_id": request_id,
-                                "error": body_text.decode(errors="replace"),
-                            },
-                        )
-                        return
-
-                    async for line in response.aiter_lines():
-                        if not self._running:
-                            break
-                        if line.startswith("data:"):
-                            data_payload = line[len("data:"):].strip()
-                            await self._send(
-                                ws,
-                                {
-                                    "type": "sse_chunk",
-                                    "request_id": request_id,
-                                    "data": data_payload,
-                                },
-                            )
-                        elif line.startswith("event:"):
-                            # forward event name as metadata
-                            await self._send(
-                                ws,
-                                {
-                                    "type": "sse_event",
-                                    "request_id": request_id,
-                                    "event": line[len("event:"):].strip(),
-                                },
-                            )
-                        # blank lines and id: lines are intentionally skipped
-
-            await self._send(ws, {"type": "sse_end", "request_id": request_id})
-            logger.info("SSE stream complete (request_id=%s)", request_id)
-
-        except httpx.ConnectError as exc:
-            logger.error("Local Hermes unreachable for SSE request %s: %s", request_id, exc)
-            await self._send(
-                ws,
-                {"type": "sse_end", "request_id": request_id, "error": "Local Hermes is unreachable"},
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Error in SSE stream %s: %s", request_id, exc)
-            await self._send(
-                ws,
-                {"type": "sse_end", "request_id": request_id, "error": str(exc)},
-            )
-
-    async def _send_error_response(
-        self,
-        ws: Any,
-        request_id: str,
-        status: int,
-        message: str,
-    ) -> None:
-        await self._send(
-            ws,
-            {
-                "type": "forward_response",
-                "request_id": request_id,
-                "status": status,
-                "body": {"error": message},
-            },
-        )
-
-    async def _send(self, ws: Any, payload: dict) -> None:
-        """Serialise and send a JSON message, serialising concurrent sends."""
-        async with self._send_lock:
-            await ws.send(json.dumps(payload))
+            resp = await client.post(url, json=update, timeout=10.0)
+            if resp.status_code not in (200, 201):
+                logger.warning("tunnel/update %d: %s", resp.status_code, resp.text[:100])
+        except httpx.HTTPError as exc:
+            logger.warning("Failed to post tunnel update: %s", exc)
