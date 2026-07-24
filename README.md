@@ -107,14 +107,15 @@ hermes config set herald.device_token <your-token-from-app>
 cd backend
 uv run uvicorn main:app --reload --port 8082
 
-# Plugin tests
-cd plugin && uv run pytest tests/ -q   # 31 tests
+# Plugin tests (uv-managed env)
+cd plugin && uv run pytest tests/ -q            # 31 tests
 
-# Backend tests
-cd backend && uv run pytest tests/ -q  # 15 tests
+# Backend tests (use the backend venv — has firebase-admin etc.)
+cd backend && .venv/bin/python -m pytest tests/ -q   # 15 tests
 
-# E2E test (full pipeline)
-uv run pytest tests/test_e2e.py -v     # 1 test, ~4s
+# E2E test (full pipeline — hermetic, in-memory Firestore, no GCP creds needed)
+# Must run with the backend venv so the spawned relay subprocess has deps:
+backend/.venv/bin/python -m pytest tests/test_e2e.py -v   # 1 test, ~2.3s
 ```
 
 ---

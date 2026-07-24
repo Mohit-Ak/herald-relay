@@ -94,7 +94,8 @@ def _start_relay():
         **os.environ,
         "ENCRYPTION_KEY": key,
         "HERALD_RELAY_URL": BASE_RELAY,
-        "FCM_PROJECT_ID": "",  # stub mode
+        "FCM_PROJECT_ID": "",  # FCM stub mode (no real push)
+        "HERALD_INMEMORY_DB": "1",  # Firestore stub — hermetic, no GCP creds
         "PORT": str(RELAY_PORT),
     }
     proc = subprocess.Popen(
