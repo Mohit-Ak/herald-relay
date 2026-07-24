@@ -15,6 +15,7 @@ load_dotenv()  # Load .env before anything else imports os.environ
 
 from routers import billing, push, relay  # noqa: E402
 from routers import hermes_proxy  # noqa: E402
+from routers.tunnel import router as tunnel_router, monitor_router  # noqa: E402
 from services.relay_manager import relay_manager  # noqa: E402
 from services.firestore_client import get_db  # noqa: E402
 
@@ -62,6 +63,8 @@ app.include_router(relay.router, prefix="/relay")
 app.include_router(hermes_proxy.router)
 app.include_router(push.router)
 app.include_router(billing.router)
+app.include_router(tunnel_router, prefix="/tunnel")
+app.include_router(monitor_router)
 
 
 # ---------------------------------------------------------------------------
