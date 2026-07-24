@@ -445,6 +445,67 @@ class DispatchRequest(BaseModel):
     task: A2ATask
 
 
+# ---------------------------------------------------------------------------
+# POST /tunnel/approval  – Flutter sends approve/deny for a QUESTION event
+# ---------------------------------------------------------------------------
+
+class ApprovalRequest(BaseModel):
+    device_token: str
+    run_id: str
+    approved: bool
+    message: Optional[str] = None   # optional free-text response
+
+
+@router.post("/approval", summary="Flutter approves/denies a QUESTION")
+async def tunnel_approval(req: ApprovalRequest):
+    """
+    When the plugin emits a QUESTION signal, Flutter receives it via the
+    monitor SSE stream and presents an approve/deny sheet.  The user's
+    decision is POSTed here; we forward it back to the plugin's SSE queue
+    so Hermes can continue (or abort) the task.
+    """
+    _require_device(req.device_token)
+
+    # Build an A2A approval task and push it to the plugin queue
+    approval_payload = {
+        "type": "approval_response",
+        "run_id": req.run_id,
+        "approved": req.approved,
+        "message": req.message,
+        "timestamp": time.time(),
+    }
+
+    q = _plugin_queues.get(req.device_token)
+    if q:
+        await q.put(json.dumps({"event": "approval", "data": approval_payload}))
+        logger.info(
+            f"[approval] device={req.device_token[:8]}... run={req.run_id} approved={req.approved}"
+        )
+    else:
+        # Plugin offline — persist in Firestore so it picks up on reconnect
+        db = get_db()
+        db.collection("devices").document(req.device_token) \
+          .collection("pending_approvals").add(approval_payload)
+        logger.warning(
+            f"[approval] Plugin offline — stored in Firestore: run={req.run_id}"
+        )
+
+    # Also forward to any Flutter monitor subscribers (so the UI updates)
+    run_map = _flutter_queues.get(req.device_token, {})
+    flutter_q = run_map.get(req.run_id)
+    if flutter_q:
+        approval_event = {
+            "signal": "APPROVAL_SENT",
+            "run_id": req.run_id,
+            "approved": req.approved,
+        }
+        await flutter_q.put(
+            json.dumps({"event": "approval_sent", "data": approval_event})
+        )
+
+    return {"ok": True, "queued": q is not None}
+
+
 @router.post("/dispatch", summary="Inject an A2A task to a connected plugin")
 async def tunnel_dispatch(req: DispatchRequest):
     """
