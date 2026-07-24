@@ -456,6 +456,24 @@ class ApprovalRequest(BaseModel):
     message: Optional[str] = None   # optional free-text response
 
 
+@router.get("/pending_approvals", summary="Plugin fetches offline-queued approvals on reconnect")
+async def get_pending_approvals(device_token: str = Query(...)):
+    """
+    Called by the plugin on reconnect.  Returns any approval decisions that
+    arrived while the plugin was offline and clears them from Firestore.
+    """
+    _require_device(device_token)
+    db = get_db()
+    col = db.collection("devices").document(device_token).collection("pending_approvals")
+    docs = list(col.stream())
+    items = []
+    for doc in docs:
+        items.append(doc.to_dict())
+        doc.reference.delete()   # consume once delivered
+    logger.info("[pending_approvals] device=%s delivered=%d", device_token[:8], len(items))
+    return {"items": items}
+
+
 @router.post("/approval", summary="Flutter approves/denies a QUESTION")
 async def tunnel_approval(req: ApprovalRequest):
     """

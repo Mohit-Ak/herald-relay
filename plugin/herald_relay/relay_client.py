@@ -64,6 +64,9 @@ class HeraldRelayClient:
         # in-flight run tasks: run_id → asyncio.Task
         self._run_tasks: dict[str, asyncio.Task] = {}
 
+        # approval queues: run_id → asyncio.Queue  (for QUESTION/approval flow)
+        self._approval_queues: dict[str, asyncio.Queue] = {}
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -121,12 +124,16 @@ class HeraldRelayClient:
             # 1. Register with Cloud
             await self._register(client)
 
-            # 2. Stream A2A tasks
+            # 2. Flush any offline-queued approvals from Firestore
+            await self._flush_pending_approvals(client)
+
+            # 3. Stream A2A tasks
             logger.info("Subscribed to tunnel events at %s/tunnel/events", self.relay_url)
             async for task_payload in self._event_stream(client):
                 if not self._running:
                     break
-                if task_payload.get("type") == "task":
+                ptype = task_payload.get("type", "")
+                if ptype == "task":
                     task = task_payload.get("task", {})
                     task_id = task.get("task_id", str(uuid.uuid4()))
                     command = task.get("command", "")
@@ -138,6 +145,16 @@ class HeraldRelayClient:
                     )
                     self._run_tasks[run_id] = t
                     t.add_done_callback(lambda ft, rid=run_id: self._run_tasks.pop(rid, None))
+                elif ptype == "approval":
+                    # Flutter approved/denied a QUESTION — unblock the waiting run
+                    approval_data = task_payload.get("data", task_payload)
+                    run_id = approval_data.get("run_id", "")
+                    approved = approval_data.get("approved", False)
+                    logger.info("Approval received: run=%s approved=%s", run_id, approved)
+                    # Signal any waiting coroutine via the approval event queue
+                    q = self._approval_queues.get(run_id)
+                    if q:
+                        await q.put({"approved": approved, "message": approval_data.get("message")})
 
     async def _register(self, client: httpx.AsyncClient) -> None:
         url = f"{self.relay_url}/tunnel/connect"
@@ -152,6 +169,42 @@ class HeraldRelayClient:
                 f"Tunnel connect failed {resp.status_code}: {resp.text[:200]}"
             )
         logger.info("Tunnel registered: %s", resp.json())
+
+    async def _flush_pending_approvals(self, client: httpx.AsyncClient) -> None:
+        """
+        On reconnect, fetch any approvals the user submitted while we were offline
+        (stored in Firestore via POST /tunnel/approval when plugin was unreachable).
+        Re-inject them into the local approval queues so in-flight runs can resume.
+        """
+        url = f"{self.relay_url}/tunnel/pending_approvals"
+        try:
+            resp = await client.get(url, params={"device_token": self.device_token})
+            if resp.status_code == 200:
+                items = resp.json().get("items", [])
+                for item in items:
+                    run_id = item.get("run_id", "")
+                    approved = item.get("approved", False)
+                    q = self._approval_queues.get(run_id)
+                    if q:
+                        await q.put({"approved": approved, "message": item.get("message")})
+                        logger.info("Flushed offline approval: run=%s approved=%s", run_id, approved)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Could not flush pending approvals: %s", exc)
+
+    async def _wait_for_approval(self, run_id: str, timeout: float = 300.0) -> dict:
+        """
+        Block until Flutter sends an approval for this run_id (or timeout).
+        Returns {"approved": bool, "message": str|None}.
+        """
+        q: asyncio.Queue = asyncio.Queue(maxsize=1)
+        self._approval_queues[run_id] = q
+        try:
+            return await asyncio.wait_for(q.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Approval timeout for run=%s — treating as denied", run_id)
+            return {"approved": False, "message": "timeout"}
+        finally:
+            self._approval_queues.pop(run_id, None)
 
     async def _event_stream(
         self, client: httpx.AsyncClient
@@ -242,6 +295,24 @@ class HeraldRelayClient:
 
                 await self._post_update(client, update)
                 seq += 1
+
+                # On QUESTION: pause and wait for Flutter approval
+                if classified.signal == QUESTION:
+                    logger.info("QUESTION signal — waiting for Flutter approval: run=%s", actual_run_id)
+                    approval = await self._wait_for_approval(actual_run_id, timeout=300.0)
+                    if not approval["approved"]:
+                        # User denied — send DONE with denial message
+                        await self._post_update(client, {
+                            "device_token": self.device_token,
+                            "run_id": actual_run_id,
+                            "seq": seq,
+                            "signal": DONE,
+                            "event": {"type": "approval_denied", "data": {}},
+                            "summary": approval.get("message") or "User denied the request.",
+                        })
+                        return
+                    # Approved — continue streaming (Hermes continues on its own)
+                    logger.info("Approval granted: run=%s", actual_run_id)
 
                 # After DONE we're finished
                 if classified.signal == DONE:
