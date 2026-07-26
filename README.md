@@ -122,7 +122,10 @@ backend/.venv/bin/python -m pytest tests/test_e2e.py -v   # 1 test, ~2.3s
 
 ## Deployment (GCE)
 
-Files are deployed to `/opt/herald-relay/` on `mailmind-rtc` (us-central1-a, project `eh-voice-ai`).
+Files are deployed to `/opt/herald-relay/` on the GCE VM **`mailmind-rtc`**
+(us-central1-a, project `eh-voice-ai`). The VM name is a legacy, immutable host
+id from before the Herald pivot — kept as an opaque identifier because GCE can't
+rename a VM in place. Nothing user-facing exposes it.
 
 ```bash
 # Deploy updated router

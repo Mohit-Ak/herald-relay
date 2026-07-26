@@ -12,6 +12,10 @@ env:
   REGION: us-central1
   REGISTRY: us-central1-docker.pkg.dev
   IMAGE: us-central1-docker.pkg.dev/eh-voice-ai/herald/relay-backend
+  # NOTE: `mailmind-rtc` is the pre-pivot GCE VM's immutable name, kept as an
+  # opaque host id. GCE can't rename a VM in place; renaming would require
+  # recreating the box from a machine image + re-pointing the IP (downtime).
+  # Nothing user-facing exposes this name. See herald HERALD_MIGRATION.md §1.
   VM_NAME: mailmind-rtc
   VM_ZONE: us-central1-a
 
