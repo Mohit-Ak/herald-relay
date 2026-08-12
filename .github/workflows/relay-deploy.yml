@@ -6,73 +6,80 @@ on:
       - main
     paths:
       - 'backend/**'
+      - '.github/workflows/relay-deploy.yml'
+
+# Serialize deploys: rapid pushes to main should never race two `tar xzf`
+# extracts on top of /opt/herald-relay. cancel-in-progress is false because
+# we'd rather queue the second deploy than abandon one mid-extract.
+concurrency:
+  group: relay-deploy
+  cancel-in-progress: false
 
 env:
   PROJECT: eh-voice-ai
-  REGION: us-central1
-  REGISTRY: us-central1-docker.pkg.dev
-  IMAGE: us-central1-docker.pkg.dev/eh-voice-ai/herald/relay-backend
   # NOTE: `mailmind-rtc` is the pre-pivot GCE VM's immutable name, kept as an
   # opaque host id. GCE can't rename a VM in place; renaming would require
   # recreating the box from a machine image + re-pointing the IP (downtime).
-  # Nothing user-facing exposes this name. See herald HERALD_MIGRATION.md §1.
+  # This string is LOAD-BEARING — changing it to `herald-rtc` breaks CD because
+  # that instance does not exist. Verify with:
+  #   gcloud compute instances list --project=eh-voice-ai
+  # Everything ON the box is correctly named herald-*: the systemd unit
+  # (herald-relay), the env file (/etc/herald-relay.env), and /opt/herald-relay.
   VM_NAME: mailmind-rtc
   VM_ZONE: us-central1-a
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
-
+    defaults:
+      run:
+        working-directory: backend
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
+      - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
-        with:
-          project_id: ${{ env.PROJECT }}
 
-      - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
-
-      - name: Build Docker image
+      # The relay runs as a plain systemd unit (herald-relay) out of
+      # /opt/herald-relay with its own venv — NOT as a Docker container. It
+      # shares port 8082 on the box, so a container deploy would collide with
+      # the running unit. Mirror the proven herald backend-deploy pattern:
+      # rsync the source, install new deps, restart the unit, poll /health.
+      #
+      # `gcloud compute ssh` provisions its own SSH key on the fly, so no
+      # GCE_SSH_KEY secret is needed.
+      - name: Push code + restart service
         run: |
-          docker build \
-            -f infra/Dockerfile \
-            -t ${{ env.IMAGE }}:${{ github.sha }} \
-            -t ${{ env.IMAGE }}:latest \
-            .
-
-      - name: Push Docker image
-        run: |
-          docker push ${{ env.IMAGE }}:${{ github.sha }}
-          docker push ${{ env.IMAGE }}:latest
-
-      - name: Set up SSH key for gcloud compute ssh
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.GCE_SSH_KEY }}" > ~/.ssh/google_compute_engine
-          chmod 600 ~/.ssh/google_compute_engine
-          ssh-keygen -y -f ~/.ssh/google_compute_engine > ~/.ssh/google_compute_engine.pub
-
-      - name: Deploy to GCE VM
-        run: |
-          gcloud compute ssh ${{ env.VM_NAME }} \
-            --zone ${{ env.VM_ZONE }} \
-            --project ${{ env.PROJECT }} \
-            --command "
-              docker pull ${{ env.IMAGE }}:${{ github.sha }} && \
-              docker stop herald-relay 2>/dev/null || true && \
-              docker rm herald-relay 2>/dev/null || true && \
-              docker run -d \
-                --name herald-relay \
-                --restart unless-stopped \
-                -p 8082:8082 \
-                --env-file /etc/herald-relay.env \
-                ${{ env.IMAGE }}:${{ github.sha }}
-            "
+          tar czf /tmp/relay.tgz --exclude=venv --exclude=.venv \
+            --exclude=__pycache__ --exclude=.pytest_cache --exclude=tests \
+            --exclude=conftest.py .
+          gcloud compute scp --zone="${VM_ZONE}" --project="${PROJECT}" \
+            /tmp/relay.tgz "${VM_NAME}:/tmp/relay.tgz"
+          gcloud compute ssh "${VM_NAME}" --zone="${VM_ZONE}" --project="${PROJECT}" \
+            --command="set -e
+              cd /opt/herald-relay
+              tar xzf /tmp/relay.tgz
+              .venv/bin/pip install -q -r requirements.txt
+              sudo systemctl restart herald-relay
+              # Poll /health up to 30s — uvicorn binds within ~5s typically.
+              # Bail out the moment we get a 200, else fail loudly with logs.
+              for i in \$(seq 1 30); do
+                if curl -fsS http://localhost:8082/health >/dev/null 2>&1; then
+                  echo \"✓ /health responded after \${i}s\"
+                  curl -fsS http://localhost:8082/health
+                  echo
+                  echo '✓ deploy complete'
+                  exit 0
+                fi
+                sleep 1
+              done
+              echo '✗ /health never responded after 30s — last attempt:'
+              curl -v http://localhost:8082/health || true
+              sudo systemctl status herald-relay --no-pager || true
+              sudo journalctl -u herald-relay --since '1 minute ago' --no-pager | tail -50
+              exit 1"
