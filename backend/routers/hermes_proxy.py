@@ -33,6 +33,18 @@ def _device_token(request: Request) -> str:
         or request.query_params.get("device_token")
     )
     if not token:
+        # Single-tenant fallback: when exactly ONE plugin is connected, use it.
+        #
+        # Upstream callers (the Herald backend's HermesClient) build request
+        # URLs as f"{base_url}{path}", so a base URL carrying a query string
+        # produces ".../hermes?device_token=X/v1/models" -> 404. There is no
+        # header passthrough for a device token either, which left NO way to
+        # address the tunnel from the Herald backend at all. Resolving the sole
+        # connected device keeps self-hosted single-user setups working with a
+        # clean base URL. Multi-tenant callers must still send the token.
+        connected = list(tunnel_mod._plugin_queues.keys())
+        if len(connected) == 1:
+            return connected[0]
         raise HTTPException(400, "Missing device_token header or query param")
     return token
 
@@ -91,6 +103,30 @@ async def hermes_health(request: Request):
     # Return relay connection status immediately — don't block on a tunnel round-trip.
     # Flutter uses this to show the "Hermes connected" indicator.
     return {"hermes_connected": connected, "relay_connected": connected}
+
+
+@router.get("/health/detailed")
+async def hermes_health_detailed(request: Request):
+    """Debug-panel health. Herald's HermesClient.health() calls this path."""
+    token = _device_token(request)
+    connected = _is_connected(token)
+    if not connected:
+        return {
+            "status": "offline",
+            "hermes_connected": False,
+            "relay_connected": False,
+        }
+    try:
+        result = await tunnel_mod.forward_http(token, "GET", "/health", None, {})
+        return {
+            "status": "ok",
+            "hermes_connected": True,
+            "relay_connected": True,
+            "hermes": result.get("body"),
+        }
+    except (ConnectionError, asyncio.TimeoutError):
+        # Tunnel is up but local Hermes did not answer.
+        return {"status": "degraded", "hermes_connected": True, "relay_connected": True}
 
 
 @router.get("/v1/models")
