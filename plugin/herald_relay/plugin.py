@@ -77,3 +77,81 @@ class HeraldRelayPlugin:
             except (asyncio.CancelledError, Exception):
                 pass
         logger.info("Herald Relay plugin stopped.")
+
+
+# ---------------------------------------------------------------------------
+# Hermes plugin registration
+# ---------------------------------------------------------------------------
+#
+# Hermes loads a plugin by importing its entry-point target and calling a
+# module-level ``register(ctx)`` (see hermes_cli/plugins.py ``_load_plugin``).
+# Without it the plugin is discovered, reported as "enabled", and then never
+# loads -- the manager records ``error="no register() function"`` and moves on.
+#
+# The tunnel is a long-lived asyncio task, but ``register()`` is synchronous and
+# may run before any event loop exists (CLI startup) or inside a running loop
+# (gateway). So we do NOT start the tunnel here. We bind it to the session
+# lifecycle hooks and start it lazily on the first ``on_session_start``, which
+# is guaranteed to run inside the gateway's event loop.
+
+_PLUGIN: HeraldRelayPlugin | None = None
+
+
+def _load_plugin_config() -> dict:
+    """Read ``herald.*`` settings from config.yaml.
+
+    Falls back to an empty dict so the plugin degrades to env vars
+    (HERALD_RELAY_URL / HERALD_DEVICE_TOKEN) rather than raising at load time.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        section = cfg.get("herald")
+        return section if isinstance(section, dict) else {}
+    except Exception:  # pragma: no cover - config is optional
+        logger.debug("herald-relay: could not read config.yaml", exc_info=True)
+        return {}
+
+
+async def _on_session_start(**_kwargs) -> None:
+    """Start the relay tunnel once, inside a live event loop."""
+    global _PLUGIN
+    if _PLUGIN is None:
+        return
+    if _PLUGIN._task is not None and not _PLUGIN._task.done():
+        return  # already running
+    if not _PLUGIN.device_token:
+        # Registering the device in the Herald app is what mints this token.
+        logger.warning(
+            "herald-relay: no device_token configured — tunnel not started. "
+            "Register the device in the Herald app, then set herald.device_token."
+        )
+        return
+    try:
+        await _PLUGIN.start()
+    except Exception:
+        logger.exception("herald-relay: tunnel failed to start")
+
+
+async def _on_session_end(**_kwargs) -> None:
+    """Tear the tunnel down with the session."""
+    if _PLUGIN is None:
+        return
+    try:
+        await _PLUGIN.stop()
+    except Exception:
+        logger.exception("herald-relay: tunnel failed to stop cleanly")
+
+
+def register(ctx) -> None:
+    """Hermes plugin entry point."""
+    global _PLUGIN
+    _PLUGIN = HeraldRelayPlugin(_load_plugin_config())
+    ctx.register_hook("on_session_start", _on_session_start)
+    ctx.register_hook("on_session_end", _on_session_end)
+    logger.info(
+        "herald-relay registered (relay=%s, token=%s)",
+        _PLUGIN.relay_url,
+        "set" if _PLUGIN.device_token else "MISSING",
+    )

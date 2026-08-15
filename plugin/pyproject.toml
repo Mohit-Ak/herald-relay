@@ -16,8 +16,17 @@ dependencies = [
 "Homepage" = "https://herald.app"
 "Repository" = "https://github.com/Mohit-Ak/herald-relay"
 
-[project.entry-points."hermes.plugins"]
-herald-relay = "herald_relay.plugin:HeraldRelayPlugin"
+# Hermes discovers pip-installed plugins via the `hermes_agent.plugins` entry
+# point group (hermes_cli/plugins.py: ENTRY_POINTS_GROUP). The old
+# "hermes.plugins" group was never read by any Hermes version — a plugin
+# published under it installs cleanly and then silently never loads.
+#
+# The value must resolve to the MODULE, not the plugin class: Hermes does
+# `module = ep.load()` then `getattr(module, "register")`. Pointing at
+# `...:HeraldRelayPlugin` loads the class, whose namespace has no register(),
+# so the plugin is dropped with error="no register() function".
+[project.entry-points."hermes_agent.plugins"]
+herald-relay = "herald_relay.plugin"
 
 [tool.hatch.build.targets.wheel]
 packages = ["herald_relay"]
