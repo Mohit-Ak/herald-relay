@@ -176,13 +176,28 @@ class HeraldRelayClient:
     async def _handle_forward_request(
         self, client: httpx.AsyncClient, payload: dict
     ) -> None:
-        """Execute a proxied HTTP request against local Hermes and POST the result."""
+        """Execute a proxied HTTP request against local Hermes and return the result.
+
+        When the relay asks for ``stream: True`` (SSE endpoints such as
+        ``/v1/runs/{id}/events``) the response is relayed CHUNK BY CHUNK as
+        Hermes produces it. Buffering it into one reply meant a 75-second run
+        delivered every spoken checkpoint in a single burst at the end — the
+        user sat in silence for over a minute, which is precisely what
+        checkpoints exist to prevent.
+        """
         request_id = payload.get("request_id", "")
         method = (payload.get("method") or "GET").upper()
         path = payload.get("path") or "/"
         body = payload.get("body")
+        wants_stream = bool(payload.get("stream"))
 
         url = f"{self.local_hermes_url}{path}"
+
+        if wants_stream:
+            await self._forward_streaming(client, request_id, method, url, body,
+                                          path)
+            return
+
         result: dict = {"device_token": self.device_token, "request_id": request_id}
         try:
             resp = await client.request(
@@ -207,6 +222,60 @@ class HeraldRelayClient:
             await client.post(f"{self.relay_url}/tunnel/http_response", json=result)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not return forwarded response: %s", exc)
+
+    async def _forward_streaming(
+        self,
+        client: httpx.AsyncClient,
+        request_id: str,
+        method: str,
+        url: str,
+        body: dict | None,
+        path: str,
+    ) -> None:
+        """Relay an SSE response upstream chunk-by-chunk, live."""
+        endpoint = f"{self.relay_url}/tunnel/http_stream"
+        sent = 0
+
+        async def push(chunk: str = "", done: bool = False) -> None:
+            try:
+                await client.post(
+                    endpoint,
+                    json={
+                        "device_token": self.device_token,
+                        "request_id": request_id,
+                        "chunk": chunk,
+                        "done": done,
+                    },
+                    timeout=15.0,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("stream chunk push failed: %s", exc)
+
+        try:
+            headers = dict(self._hermes_headers())
+            headers["Accept"] = "text/event-stream"
+            async with client.stream(
+                method,
+                url,
+                json=body if body is not None else None,
+                headers=headers,
+                # Long runs can span minutes; no total read cap.
+                timeout=httpx.Timeout(None, connect=15.0),
+            ) as resp:
+                async for line in resp.aiter_lines():
+                    if line is None:
+                        continue
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    await push(stripped + "\n\n")
+                    sent += 1
+            logger.info("Streamed %s %s -> %d chunk(s)", method, path, sent)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Stream %s %s failed: %s", method, path, exc)
+            await push(json.dumps({"error": f"{type(exc).__name__}: {exc}"}) )
+        finally:
+            await push(done=True)
 
     async def _register(self, client: httpx.AsyncClient) -> None:
         url = f"{self.relay_url}/tunnel/connect"

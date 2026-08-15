@@ -148,16 +148,24 @@ async def get_channels(request: Request):
 async def _sse_generator(token: str, method: str, path: str, body, headers: dict):
     """SSE passthrough.
 
-    Only the WebSocket transport can stream incrementally. Over the SSE tunnel
-    we do a single round-trip and emit the result as one event so voice runs
-    still work (at the cost of incremental streaming).
+    Streams the plugin's response chunks through as they arrive so spoken
+    checkpoints reach the user DURING a long run. Older plugins that answer
+    with a single ``/tunnel/http_response`` still work — ``open_stream()``
+    falls back to emitting that one payload.
     """
     if tunnel_mod.is_plugin_connected(token):
         try:
-            result = await tunnel_mod.forward_http(
-                token, method, path, body, headers, timeout=120.0
-            )
-            yield f"data: {json.dumps(result.get('body'))}\n\n"
+            async for chunk in tunnel_mod.open_stream(
+                token, method, path, body, headers, timeout=300.0
+            ):
+                if not chunk:
+                    continue
+                text = chunk if isinstance(chunk, str) else json.dumps(chunk)
+                # Pass through already-framed SSE verbatim; otherwise frame it.
+                if text.lstrip().startswith("data:"):
+                    yield text if text.endswith("\n\n") else text + "\n\n"
+                else:
+                    yield f"data: {text}\n\n"
         except ConnectionError:
             yield f"data: {json.dumps({'error': 'device_offline'})}\n\n"
         except asyncio.TimeoutError:

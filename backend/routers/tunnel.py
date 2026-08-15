@@ -44,6 +44,9 @@ _flutter_queues: dict[str, dict[str, asyncio.Queue]] = {}   # device_token → {
 # connects with SSE (not a WebSocket), so relay_manager's WS registry is always
 # empty for it and cannot be used to reach a plugin-side Hermes.
 _http_waiters: dict[str, asyncio.Future] = {}
+# Per-request chunk queues for STREAMING forwards (SSE run events). Separate
+# from _http_waiters, which holds single-shot replies.
+_stream_waiters: dict[str, asyncio.Queue] = {}
 
 # How long the proxy waits for the plugin to answer a forwarded request.
 HTTP_FORWARD_TIMEOUT_S = 30.0
@@ -103,6 +106,89 @@ class HttpResponseRequest(BaseModel):
     body: object = None
     headers: dict = {}
     error: Optional[str] = None
+
+
+class HttpStreamChunkRequest(BaseModel):
+    """One incremental chunk of a streaming (SSE) forwarded response.
+
+    The plugin POSTs these as upstream data arrives, instead of buffering the
+    whole run and answering once. Without it, a 75-second Hermes run delivered
+    every spoken checkpoint in a single burst at the END — the user heard
+    nothing for over a minute, which is exactly the silence checkpoints exist
+    to prevent.
+    """
+
+    device_token: str
+    request_id: str
+    chunk: str
+    done: bool = False
+
+
+async def open_stream(
+    device_token: str,
+    method: str,
+    path: str,
+    body: dict | None = None,
+    headers: dict | None = None,
+    timeout: float = HTTP_FORWARD_TIMEOUT_S,
+):
+    """Forward a request and yield the plugin's response chunks as they land.
+
+    Falls back to a single-shot reply if the plugin is an older build that
+    answers with ``/tunnel/http_response`` instead of streaming chunks.
+    """
+    queue = _plugin_queues.get(device_token)
+    if queue is None:
+        raise ConnectionError("plugin not connected")
+
+    request_id = str(uuid.uuid4())
+    chunk_q: asyncio.Queue = asyncio.Queue()
+    _stream_waiters[request_id] = chunk_q
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    _http_waiters[request_id] = fut
+
+    try:
+        await queue.put(
+            {
+                "type": "forward_request",
+                "request_id": request_id,
+                "method": method,
+                "path": path,
+                "body": body,
+                "headers": headers or {},
+                "stream": True,
+            }
+        )
+
+        while True:
+            chunk_task = asyncio.ensure_future(chunk_q.get())
+            done_set, _ = await asyncio.wait(
+                {chunk_task, fut},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done_set:
+                chunk_task.cancel()
+                raise asyncio.TimeoutError()
+
+            if chunk_task in done_set:
+                item = chunk_task.result()
+                if item is None:  # end-of-stream sentinel
+                    return
+                yield item
+                continue
+
+            chunk_task.cancel()
+            # Legacy single-shot reply from an older plugin.
+            result = fut.result()
+            payload = result.get("body")
+            if payload is not None:
+                yield payload if isinstance(payload, str) else json.dumps(payload)
+            return
+    finally:
+        _http_waiters.pop(request_id, None)
+        _stream_waiters.pop(request_id, None)
 
 
 
@@ -378,6 +464,24 @@ async def tunnel_http_response(req: HttpResponseRequest):
         fut.set_result(
             {"status": req.status, "body": req.body, "headers": req.headers or {}}
         )
+    return {"ok": True}
+
+
+@router.post("/http_stream", summary="Plugin streams an incremental response chunk")
+async def tunnel_http_stream(req: HttpStreamChunkRequest):
+    """Incremental half of a STREAMING forward started by ``open_stream()``.
+
+    The plugin POSTs each SSE chunk here the moment its local Hermes produces
+    it, so spoken checkpoints reach the user DURING a long run rather than all
+    at once when it ends. ``done=True`` closes the stream.
+    """
+    q = _stream_waiters.get(req.request_id)
+    if q is None:
+        return {"ok": False, "reason": "no_waiter"}
+    if req.chunk:
+        await q.put(req.chunk)
+    if req.done:
+        await q.put(None)  # end-of-stream sentinel
     return {"ok": True}
 
 
