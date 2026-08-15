@@ -1,5 +1,5 @@
 """Push notification registration and FCM delivery – Firestore-backed."""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 import httpx, os, uuid, time, logging
 from typing import Optional
@@ -15,9 +15,15 @@ FREE_BURSTS = 20
 
 class RegisterRequest(BaseModel):
     device_token: Optional[str] = None  # None = create new
-    fcm_token: str
+    # OPTIONAL on purpose. The Flutter connect screen registers BEFORE it has
+    # an FCM token (and self-hosted users may never enable push at all), so
+    # requiring it here 422'd every pairing attempt with an error the app
+    # surfaced as a bare "HTTP 422". Push delivery already handles a missing
+    # token at /push/send (400 "No FCM token on file"), and the client can
+    # re-register later to attach one.
+    fcm_token: Optional[str] = None
     platform: str = "android"  # android | ios
-    plan: str = "byok"  # byok | credits
+    plan: str = "byok"  # byok | credits | self_hosted | cloud
     hermes_url_hint: Optional[str] = None
 
 
@@ -28,12 +34,43 @@ class PushSendRequest(BaseModel):
     metadata: dict = {}
 
 
+def _relay_base(request: Request) -> str:
+    """Public base URL for this relay, as the CLIENT should dial it.
+
+    Resolution order:
+      1. ``HERALD_RELAY_URL`` when it names a real, externally reachable host
+         (not localhost/127.0.0.1 and not the unregistered placeholder domain).
+      2. The Host header of the incoming request — the address the client
+         demonstrably just reached us on, honouring X-Forwarded-Proto/Host
+         when behind a proxy.
+      3. The configured value as a last resort.
+    """
+    configured = (os.getenv("HERALD_RELAY_URL", "") or "").strip().rstrip("/")
+    bad_hosts = ("localhost", "127.0.0.1", "0.0.0.0", "relay.herald.app")
+    if configured and not any(h in configured for h in bad_hosts):
+        return configured
+
+    fwd_host = request.headers.get("x-forwarded-host")
+    host = fwd_host or request.headers.get("host")
+    if host:
+        proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "http"
+        return f"{proto}://{host}".rstrip("/")
+    return configured or "http://localhost:8082"
+
+
 @router.post("/register")
-async def register_device(req: RegisterRequest):
+async def register_device(req: RegisterRequest, request: Request):
     db = get_db()
     token = req.device_token or str(uuid.uuid4())
     now = time.time()
-    relay_ws_url = RELAY_URL.replace("https://", "wss://").replace("http://", "ws://")
+    # Build the ws:// URL the DEVICE will dial back on. HERALD_RELAY_URL is
+    # often left at a loopback/placeholder value on the box (it was
+    # "http://localhost:8082", which tells a phone to connect to ITSELF, and
+    # the packaged default "wss://relay.herald.app" is an unregistered
+    # domain). Prefer the host the client actually reached us on, so
+    # registration is correct no matter how the box is configured.
+    base = _relay_base(request)
+    relay_ws_url = base.replace("https://", "wss://").replace("http://", "ws://")
     relay_url = relay_ws_url + "/relay/connect"
 
     # Merge with existing doc if re-registering
