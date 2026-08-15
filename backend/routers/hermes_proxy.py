@@ -1,41 +1,134 @@
-"""Proxy HTTP requests from the Flutter app through the WS relay tunnel to local Hermes."""
+"""Proxy HTTP requests from the Flutter app through the relay tunnel to local Hermes.
+
+Transport note
+--------------
+The hermes-herald plugin connects over **SSE** (``GET /tunnel/events``), not a
+WebSocket. ``relay_manager`` only tracks WebSocket registrations, so its
+registry is permanently empty for SSE plugins -- every ``/hermes/*`` call used
+to answer ``device_offline`` even with a healthy tunnel, and ``/hermes/health``
+reported ``hermes_connected: false``.
+
+These endpoints therefore prefer the SSE tunnel (``routers.tunnel``) and fall
+back to the WebSocket relay when one is registered, so both transports work.
+"""
 from fastapi import APIRouter, Request, Response, HTTPException
 from fastapi.responses import StreamingResponse
 from services.relay_manager import relay_manager
-import json, logging
+from routers import tunnel as tunnel_mod
+import asyncio
+import json
+import logging
+from typing import NoReturn
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/hermes", tags=["hermes-proxy"])
 
 SSE_PATHS = {"/v1/runs", "/v1/chat/completions"}
 
+
 def _device_token(request: Request) -> str:
-    token = request.headers.get("X-Device-Token") or request.query_params.get("device_token")
+    token = (
+        request.headers.get("X-Device-Token")
+        or request.headers.get("device_token")
+        or request.query_params.get("device_token")
+    )
     if not token:
         raise HTTPException(400, "Missing device_token header or query param")
     return token
 
-def _offline_response():
-    raise HTTPException(503, detail={"error": "device_offline", "message": "Hermes is not connected. Make sure the herald-relay plugin is running on your local Hermes."})
+
+def _is_connected(token: str) -> bool:
+    """Connected over EITHER transport."""
+    return tunnel_mod.is_plugin_connected(token) or relay_manager.is_connected(token)
+
+
+def _offline_response() -> NoReturn:
+    raise HTTPException(
+        503,
+        detail={
+            "error": "device_offline",
+            "message": "Hermes is not connected. Make sure the herald-relay plugin is running on your local Hermes.",
+        },
+    )
+
+
+async def _proxy(token: str, method: str, path: str, body=None, headers: dict | None = None):
+    """Single request/response round-trip over whichever transport is live."""
+    if tunnel_mod.is_plugin_connected(token):
+        try:
+            result = await tunnel_mod.forward_http(token, method, path, body, headers or {})
+        except ConnectionError:
+            _offline_response()
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                504,
+                detail={
+                    "error": "hermes_timeout",
+                    "message": "Local Hermes did not respond in time.",
+                },
+            )
+        return Response(
+            content=json.dumps(result.get("body")),
+            media_type="application/json",
+            status_code=result.get("status", 200),
+        )
+
+    if relay_manager.is_connected(token):
+        async for item in relay_manager.forward_request(token, method, path, body, headers or {}):
+            if item.get("type") == "response":
+                return Response(
+                    content=json.dumps(item["body"]),
+                    media_type="application/json",
+                    status_code=item["status"],
+                )
+    _offline_response()
+
 
 @router.get("/health")
 async def hermes_health(request: Request):
     token = _device_token(request)
-    connected = relay_manager.is_connected(token)
+    connected = _is_connected(token)
     # Return relay connection status immediately — don't block on a tunnel round-trip.
     # Flutter uses this to show the "Hermes connected" indicator.
     return {"hermes_connected": connected, "relay_connected": connected}
 
+
 @router.get("/v1/models")
 async def get_models(request: Request):
     token = _device_token(request)
-    if not relay_manager.is_connected(token): _offline_response()
-    async for item in relay_manager.forward_request(token, "GET", "/v1/models", None, {}):
-        if item.get("type") == "response":
-            return Response(content=json.dumps(item["body"]), media_type="application/json", status_code=item["status"])
-    _offline_response()
+    if not _is_connected(token):
+        _offline_response()
+    return await _proxy(token, "GET", "/v1/models")
+
+
+@router.get("/v1/channels")
+async def get_channels(request: Request):
+    token = _device_token(request)
+    if not _is_connected(token):
+        _offline_response()
+    return await _proxy(token, "GET", "/v1/channels")
+
 
 async def _sse_generator(token: str, method: str, path: str, body, headers: dict):
+    """SSE passthrough.
+
+    Only the WebSocket transport can stream incrementally. Over the SSE tunnel
+    we do a single round-trip and emit the result as one event so voice runs
+    still work (at the cost of incremental streaming).
+    """
+    if tunnel_mod.is_plugin_connected(token):
+        try:
+            result = await tunnel_mod.forward_http(
+                token, method, path, body, headers, timeout=120.0
+            )
+            yield f"data: {json.dumps(result.get('body'))}\n\n"
+        except ConnectionError:
+            yield f"data: {json.dumps({'error': 'device_offline'})}\n\n"
+        except asyncio.TimeoutError:
+            yield f"data: {json.dumps({'error': 'hermes_timeout'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
     async for item in relay_manager.forward_request(token, method, path, body, headers):
         if item["type"] == "sse_chunk":
             yield item["data"]
@@ -48,32 +141,41 @@ async def _sse_generator(token: str, method: str, path: str, body, headers: dict
             yield f"data: {json.dumps({'error': item['message']})}\n\n"
             break
 
+
 @router.post("/v1/runs")
 async def start_run(request: Request):
     token = _device_token(request)
-    if not relay_manager.is_connected(token): _offline_response()
+    if not _is_connected(token):
+        _offline_response()
     body = await request.json()
-    return StreamingResponse(_sse_generator(token, "POST", "/v1/runs", body, {}), media_type="text/event-stream")
+    return StreamingResponse(
+        _sse_generator(token, "POST", "/v1/runs", body, {}), media_type="text/event-stream"
+    )
+
 
 @router.get("/v1/runs/{run_id}/events")
 async def run_events(run_id: str, request: Request):
     token = _device_token(request)
-    if not relay_manager.is_connected(token): _offline_response()
-    return StreamingResponse(_sse_generator(token, "GET", f"/v1/runs/{run_id}/events", None, {}), media_type="text/event-stream")
+    if not _is_connected(token):
+        _offline_response()
+    return StreamingResponse(
+        _sse_generator(token, "GET", f"/v1/runs/{run_id}/events", None, {}),
+        media_type="text/event-stream",
+    )
+
 
 @router.post("/v1/runs/{run_id}/stop")
 async def stop_run(run_id: str, request: Request):
     token = _device_token(request)
-    if not relay_manager.is_connected(token): _offline_response()
-    async for item in relay_manager.forward_request(token, "POST", f"/v1/runs/{run_id}/stop", None, {}):
-        if item.get("type") == "response":
-            return Response(content=json.dumps(item["body"]), media_type="application/json", status_code=item["status"])
+    if not _is_connected(token):
+        _offline_response()
+    return await _proxy(token, "POST", f"/v1/runs/{run_id}/stop")
+
 
 @router.post("/v1/runs/{run_id}/approval")
 async def approve_run(run_id: str, request: Request):
     token = _device_token(request)
-    if not relay_manager.is_connected(token): _offline_response()
+    if not _is_connected(token):
+        _offline_response()
     body = await request.json()
-    async for item in relay_manager.forward_request(token, "POST", f"/v1/runs/{run_id}/approval", body, {}):
-        if item.get("type") == "response":
-            return Response(content=json.dumps(item["body"]), media_type="application/json", status_code=item["status"])
+    return await _proxy(token, "POST", f"/v1/runs/{run_id}/approval", body)

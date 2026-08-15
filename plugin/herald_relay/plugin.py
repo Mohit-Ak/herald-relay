@@ -10,6 +10,27 @@ from .relay_client import HeraldRelayClient
 logger = logging.getLogger(__name__)
 
 
+def _api_key_from_env_file() -> str:
+    """Read API_SERVER_KEY from ~/.hermes/.env as a last resort.
+
+    The gateway loads .env into its own process env, but the plugin may be
+    constructed in a context where that has not happened yet (e.g. a CLI
+    probe). Reading the file directly keeps the tunnel usable either way.
+    """
+    try:
+        from pathlib import Path
+
+        env_path = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")) / ".env"
+        if not env_path.is_file():
+            return ""
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("API_SERVER_KEY="):
+                return line.split("=", 1)[1].strip()
+    except Exception:  # pragma: no cover - best effort
+        logger.debug("herald-relay: could not read API_SERVER_KEY", exc_info=True)
+    return ""
+
+
 class HeraldRelayPlugin:
     """Hermes plugin that bridges local Hermes to Herald Cloud via SSE+POST tunnel."""
 
@@ -34,6 +55,13 @@ class HeraldRelayPlugin:
             "device_token", os.getenv("HERALD_DEVICE_TOKEN")
         )
         self.hermes_version: str = config.get("hermes_version", "0.1.0")
+        # Key for the LOCAL Hermes api_server. Config wins; otherwise fall back
+        # to the same API_SERVER_KEY the gateway itself reads from the
+        # environment / ~/.hermes/.env, so a working api_server needs no extra
+        # setup here.
+        self.hermes_key: str = config.get(
+            "hermes_key", os.getenv("API_SERVER_KEY", "")
+        ) or _api_key_from_env_file()
 
         self.client: HeraldRelayClient | None = None
         self._task: asyncio.Task | None = None
@@ -56,6 +84,7 @@ class HeraldRelayPlugin:
             device_token=self.device_token or "",
             local_hermes_url=local_hermes_url,
             hermes_version=self.hermes_version,
+            hermes_key=self.hermes_key,
         )
         self._task = asyncio.create_task(
             self.client.run_forever(), name="herald-relay-client"

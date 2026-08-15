@@ -79,8 +79,16 @@ async def root():
 
 @app.get("/health", tags=["meta"])
 async def health():
+    # Count BOTH transports: plugins connect over SSE (/tunnel/events), while
+    # relay_manager only tracks WebSocket clients. Counting only the latter
+    # made this read 0 with a perfectly healthy SSE tunnel.
+    from routers import tunnel as _tunnel
+
     return {
         "status": "ok",
         "service": "herald-relay",
-        "connected_devices": relay_manager.connected_count(),
+        "connected_devices": relay_manager.connected_count()
+        + _tunnel.plugin_connected_count(),
+        "ws_devices": relay_manager.connected_count(),
+        "sse_devices": _tunnel.plugin_connected_count(),
     }

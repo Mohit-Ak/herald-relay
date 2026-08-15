@@ -51,11 +51,15 @@ class HeraldRelayClient:
         device_token: str,
         local_hermes_url: str,
         hermes_version: str = "0.1.0",
+        hermes_key: str = "",
     ):
         self.relay_url = relay_url.rstrip("/")
         self.device_token = device_token
         self.local_hermes_url = local_hermes_url.rstrip("/")
         self.hermes_version = hermes_version
+        # Hermes api_server requires `Authorization: Bearer <API_SERVER_KEY>`;
+        # without it every forwarded call comes back 401.
+        self.hermes_key = hermes_key
 
         self._running = False
         self._agent_card: dict = {}
@@ -66,6 +70,12 @@ class HeraldRelayClient:
 
         # approval queues: run_id → asyncio.Queue  (for QUESTION/approval flow)
         self._approval_queues: dict[str, asyncio.Queue] = {}
+
+    def _hermes_headers(self) -> dict:
+        """Auth headers for calls into the LOCAL Hermes api_server."""
+        if self.hermes_key:
+            return {"Authorization": f"Bearer {self.hermes_key}"}
+        return {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -155,6 +165,48 @@ class HeraldRelayClient:
                     q = self._approval_queues.get(run_id)
                     if q:
                         await q.put({"approved": approved, "message": approval_data.get("message")})
+                elif ptype == "forward_request":
+                    # Cloud is proxying an HTTP call from the phone (/hermes/*)
+                    # down to this machine's Hermes. Handle out-of-band so a slow
+                    # request never stalls the event stream.
+                    asyncio.create_task(
+                        self._handle_forward_request(client, task_payload)
+                    )
+
+    async def _handle_forward_request(
+        self, client: httpx.AsyncClient, payload: dict
+    ) -> None:
+        """Execute a proxied HTTP request against local Hermes and POST the result."""
+        request_id = payload.get("request_id", "")
+        method = (payload.get("method") or "GET").upper()
+        path = payload.get("path") or "/"
+        body = payload.get("body")
+
+        url = f"{self.local_hermes_url}{path}"
+        result: dict = {"device_token": self.device_token, "request_id": request_id}
+        try:
+            resp = await client.request(
+                method,
+                url,
+                json=body if body is not None else None,
+                headers=self._hermes_headers(),
+                timeout=30.0,
+            )
+            try:
+                parsed = resp.json()
+            except Exception:
+                parsed = {"raw": resp.text[:4000]}
+            result["status"] = resp.status_code
+            result["body"] = parsed
+            logger.info("Forwarded %s %s -> %s", method, path, resp.status_code)
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = f"{type(exc).__name__}: {exc}"
+            logger.warning("Forward %s %s failed: %s", method, path, exc)
+
+        try:
+            await client.post(f"{self.relay_url}/tunnel/http_response", json=result)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not return forwarded response: %s", exc)
 
     async def _register(self, client: httpx.AsyncClient) -> None:
         url = f"{self.relay_url}/tunnel/connect"

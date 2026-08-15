@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query
@@ -37,6 +38,72 @@ monitor_router = APIRouter(tags=["monitor"])  # mounted at / in main.py
 # ---------------------------------------------------------------------------
 _plugin_queues: dict[str, asyncio.Queue] = {}               # device_token → Queue
 _flutter_queues: dict[str, dict[str, asyncio.Queue]] = {}   # device_token → {run_id → Queue}
+
+# request_id → Future resolved by POST /tunnel/http_response.
+# Backs the HTTP-over-SSE forwarding used by the /hermes/* proxy: the plugin
+# connects with SSE (not a WebSocket), so relay_manager's WS registry is always
+# empty for it and cannot be used to reach a plugin-side Hermes.
+_http_waiters: dict[str, asyncio.Future] = {}
+
+# How long the proxy waits for the plugin to answer a forwarded request.
+HTTP_FORWARD_TIMEOUT_S = 30.0
+
+
+def is_plugin_connected(device_token: str) -> bool:
+    """True when the plugin holds a live GET /tunnel/events SSE stream."""
+    return device_token in _plugin_queues
+
+
+def plugin_connected_count() -> int:
+    return len(_plugin_queues)
+
+
+async def forward_http(
+    device_token: str,
+    method: str,
+    path: str,
+    body: dict | None = None,
+    headers: dict | None = None,
+    timeout: float = HTTP_FORWARD_TIMEOUT_S,
+) -> dict:
+    """Forward an HTTP request to the plugin over SSE and await its reply.
+
+    Returns ``{"status": int, "body": Any, "headers": dict}``.
+    Raises ConnectionError when the plugin is not subscribed, TimeoutError
+    when it does not answer in time.
+    """
+    queue = _plugin_queues.get(device_token)
+    if queue is None:
+        raise ConnectionError("plugin not connected")
+
+    request_id = str(uuid.uuid4())
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future = loop.create_future()
+    _http_waiters[request_id] = fut
+    try:
+        await queue.put(
+            {
+                "type": "forward_request",
+                "request_id": request_id,
+                "method": method,
+                "path": path,
+                "body": body,
+                "headers": headers or {},
+            }
+        )
+        return await asyncio.wait_for(fut, timeout=timeout)
+    finally:
+        _http_waiters.pop(request_id, None)
+
+
+class HttpResponseRequest(BaseModel):
+    device_token: str
+    request_id: str
+    status: int = 200
+    body: object = None
+    headers: dict = {}
+    error: Optional[str] = None
+
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +359,27 @@ async def tunnel_events(
 # ---------------------------------------------------------------------------
 # POST /tunnel/update  – Plugin → Cloud classified events / results
 # ---------------------------------------------------------------------------
+
+@router.post("/http_response", summary="Plugin returns a forwarded HTTP response")
+async def tunnel_http_response(req: HttpResponseRequest):
+    """Completion half of the HTTP-over-SSE forwarding started by forward_http().
+
+    The plugin receives ``{"type": "forward_request", ...}`` on its SSE stream,
+    performs the call against its local Hermes, and POSTs the result here.
+    """
+    fut = _http_waiters.get(req.request_id)
+    if fut is None or fut.done():
+        # Late or duplicate reply — the proxy already gave up.
+        return {"ok": False, "reason": "no_waiter"}
+
+    if req.error:
+        fut.set_result({"status": 502, "body": {"error": req.error}, "headers": {}})
+    else:
+        fut.set_result(
+            {"status": req.status, "body": req.body, "headers": req.headers or {}}
+        )
+    return {"ok": True}
+
 
 @router.post("/update", summary="Plugin sends classified events / task results")
 async def tunnel_update(req: TunnelUpdateRequest):
