@@ -114,13 +114,60 @@ def _load_plugin_config() -> dict:
         return {}
 
 
-async def _on_session_start(**_kwargs) -> None:
-    """Start the relay tunnel once, inside a live event loop."""
-    global _PLUGIN
+def _spawn(coro) -> None:
+    """Run *coro* whether or not we are already on an event loop.
+
+    Hermes invokes hooks SYNCHRONOUSLY (``ret = cb(**kwargs)`` in
+    PluginManager.invoke_hook). An ``async def`` hook therefore returns an
+    un-awaited coroutine that is silently dropped -- the tunnel never starts
+    and nothing is logged. Hooks must be plain functions that schedule their
+    own async work.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None:
+        loop.create_task(coro)
+        return
+
+    # No running loop (CLI startup): run to completion in a private loop.
+    try:
+        asyncio.run(coro)
+    except Exception:
+        logger.exception("herald-relay: background task failed")
+
+
+async def _start_tunnel() -> None:
     if _PLUGIN is None:
         return
     if _PLUGIN._task is not None and not _PLUGIN._task.done():
         return  # already running
+    try:
+        await _PLUGIN.start()
+    except Exception:
+        logger.exception("herald-relay: tunnel failed to start")
+
+
+async def _stop_tunnel() -> None:
+    if _PLUGIN is None:
+        return
+    try:
+        await _PLUGIN.stop()
+    except Exception:
+        logger.exception("herald-relay: tunnel failed to stop cleanly")
+
+
+def _on_session_start(**_kwargs) -> None:
+    """Start the relay tunnel once, inside a live event loop.
+
+    NOTE: deliberately a *sync* function -- see _spawn().
+    """
+    if _PLUGIN is None:
+        return
+    if _PLUGIN._task is not None and not _PLUGIN._task.done():
+        return
     if not _PLUGIN.device_token:
         # Registering the device in the Herald app is what mints this token.
         logger.warning(
@@ -128,20 +175,15 @@ async def _on_session_start(**_kwargs) -> None:
             "Register the device in the Herald app, then set herald.device_token."
         )
         return
-    try:
-        await _PLUGIN.start()
-    except Exception:
-        logger.exception("herald-relay: tunnel failed to start")
+    logger.info("herald-relay: starting tunnel to %s", _PLUGIN.relay_url)
+    _spawn(_start_tunnel())
 
 
-async def _on_session_end(**_kwargs) -> None:
+def _on_session_end(**_kwargs) -> None:
     """Tear the tunnel down with the session."""
     if _PLUGIN is None:
         return
-    try:
-        await _PLUGIN.stop()
-    except Exception:
-        logger.exception("herald-relay: tunnel failed to stop cleanly")
+    _spawn(_stop_tunnel())
 
 
 def register(ctx) -> None:

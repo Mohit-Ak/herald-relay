@@ -72,7 +72,25 @@ def test_register_does_not_start_tunnel_eagerly():
     assert plugin_mod._PLUGIN._task is None
 
 
-def test_session_start_without_token_is_a_noop(monkeypatch, caplog):
+def test_hooks_are_sync_callables_not_coroutines():
+    """Hermes calls hooks synchronously (`ret = cb(**kwargs)`).
+
+    An `async def` hook returns an un-awaited coroutine that is silently
+    dropped -- the tunnel never starts and nothing is logged. This is the
+    exact bug that made the plugin load but do nothing.
+    """
+    import inspect
+
+    ctx = FakeCtx()
+    register(ctx)
+    for name, callbacks in ctx.hooks.items():
+        for cb in callbacks:
+            assert not inspect.iscoroutinefunction(cb), (
+                f"hook {name} is async; Hermes will never await it"
+            )
+
+
+def test_session_start_without_token_is_a_noop(monkeypatch):
     """No device token yet (user hasn't registered the device) -> warn, don't crash."""
     monkeypatch.setattr(plugin_mod, "_load_plugin_config", lambda: {"relay_url": "http://x"})
     monkeypatch.delenv("HERALD_DEVICE_TOKEN", raising=False)
@@ -80,7 +98,7 @@ def test_session_start_without_token_is_a_noop(monkeypatch, caplog):
     register(ctx)
     assert plugin_mod._PLUGIN.device_token is None
 
-    asyncio.run(ctx.hooks["on_session_start"][0]())
+    ctx.hooks["on_session_start"][0]()
     assert plugin_mod._PLUGIN._task is None
 
 
@@ -97,11 +115,27 @@ def test_session_start_starts_tunnel_when_token_present(monkeypatch):
 
     async def fake_start(self):
         started["yes"] = True
-        self._task = asyncio.current_task()
 
     monkeypatch.setattr(HeraldRelayPlugin, "start", fake_start)
-    asyncio.run(ctx.hooks["on_session_start"][0]())
+
+    async def drive():
+        ctx.hooks["on_session_start"][0]()
+        await asyncio.sleep(0)  # let the spawned task run
+        await asyncio.sleep(0)
+
+    asyncio.run(drive())
     assert started.get("yes") is True
+
+
+def test_spawn_works_with_no_running_loop(monkeypatch):
+    """register()/hooks can fire at CLI startup where no loop exists yet."""
+    ran = {}
+
+    async def work():
+        ran["yes"] = True
+
+    plugin_mod._spawn(work())
+    assert ran.get("yes") is True
 
 
 def test_session_start_is_idempotent(monkeypatch):
@@ -123,13 +157,14 @@ def test_session_start_is_idempotent(monkeypatch):
 
     async def drive():
         hook = ctx.hooks["on_session_start"][0]
-        await hook()
+        hook()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
         # Simulate a live tunnel task so the guard trips.
-        fut = asyncio.get_running_loop().create_future()
         plugin_mod._PLUGIN._task = asyncio.ensure_future(asyncio.sleep(0.05))
-        await hook()
+        hook()
+        await asyncio.sleep(0)
         plugin_mod._PLUGIN._task.cancel()
-        fut.cancel()
 
     asyncio.run(drive())
     assert len(calls) == 1
