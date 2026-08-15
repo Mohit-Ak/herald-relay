@@ -215,3 +215,43 @@ async def approve_run(run_id: str, request: Request):
         _offline_response()
     body = await request.json()
     return await _proxy(token, "POST", f"/v1/runs/{run_id}/approval", body)
+
+
+# ---------------------------------------------------------------------------
+# Generic passthrough — MUST be declared last so the explicit routes above win.
+# ---------------------------------------------------------------------------
+#
+# Herald calls more of the Hermes API than the hand-written routes covered
+# (e.g. POST /api/sessions for durable conversation sessions), and every
+# uncovered path returned a confusing 404 that surfaced as
+# "create_session failed: HTTP 404" with session continuity silently broken.
+# Forwarding anything under /hermes/** keeps the proxy in step with the Hermes
+# API without needing a new route per endpoint.
+@router.api_route(
+    "/{full_path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+)
+async def passthrough(full_path: str, request: Request):
+    token = _device_token(request)
+    if not _is_connected(token):
+        _offline_response()
+
+    body = None
+    if request.method in ("POST", "PUT", "PATCH"):
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+
+    path = "/" + full_path.lstrip("/")
+    query = request.url.query
+    # Drop device_token from the forwarded query — it addresses the tunnel,
+    # not the Hermes endpoint behind it.
+    if query:
+        kept = "&".join(
+            p for p in query.split("&") if not p.startswith("device_token=")
+        )
+        if kept:
+            path = f"{path}?{kept}"
+
+    return await _proxy(token, request.method, path, body)
