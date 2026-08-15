@@ -1,0 +1,19 @@
+[Unit]
+Description=Herald Relay Tunnel - remote access to local Hermes
+Documentation=https://github.com/Mohit-Ak/herald-relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/mohit/projects/herald-relay/backend/venv/bin/python /home/mohit/.hermes/scripts/herald_tunnel.py
+Restart=always
+RestartSec=10
+# The tunnel is useless if local Hermes is down, but it reconnects on its own,
+# so never give up permanently.
+StartLimitIntervalSec=0
+Environment=PYTHONUNBUFFERED=1
+Environment=HERALD_LOCAL_HERMES_URL=http://127.0.0.1:8642
+
+[Install]
+WantedBy=default.target
