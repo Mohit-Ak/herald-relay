@@ -25,7 +25,10 @@ from typing import AsyncGenerator, Optional
 
 import httpx
 
-from .event_classifier import EventClassifier, DONE, QUESTION
+from .event_classifier import (
+    EventClassifier, DONE, QUESTION, MILESTONE, IGNORE,
+)
+from .push_triggers import PushTriggerPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,19 @@ _SSE_DATA_RE = re.compile(r"^data:\s*(.*)")
 
 # How long to wait for a heartbeat before considering the stream stale
 _HEARTBEAT_TIMEOUT_S = 60.0
+
+# How long the run-event stream may produce NOTHING before we declare the run
+# stuck and tell the user. Hermes emits tool/message events continuously during
+# real work, so several minutes of total silence means it is wedged, crashed,
+# or the tunnel died. Without this the loop waits forever and the user hears
+# nothing at all — the worst possible failure mode for a background task.
+_STALL_TIMEOUT_S = float(os.environ.get("HERALD_STALL_TIMEOUT_S", "300"))
+
+# How long to wait for the user to answer an approval before giving up.
+# The old 300 s auto-denied any question asked while the user was asleep or
+# away — the run died on its own timer. Approvals are re-pushed with high
+# urgency, so a long window is safe and far friendlier.
+_APPROVAL_TIMEOUT_S = float(os.environ.get("HERALD_APPROVAL_TIMEOUT_S", "3600"))
 
 
 class HeraldRelayClient:
@@ -57,13 +73,17 @@ class HeraldRelayClient:
         self.device_token = device_token
         self.local_hermes_url = local_hermes_url.rstrip("/")
         self.hermes_version = hermes_version
-        # Hermes api_server requires `Authorization: Bearer <API_SERVER_KEY>`;
+        # Hermes api_server requires `Authorization: Bearer <API_S...Y>`;
         # without it every forwarded call comes back 401.
         self.hermes_key = hermes_key
 
         self._running = False
         self._agent_card: dict = {}
         self._hermes_session_id: Optional[str] = None
+        # Decides which mid-run events are worth SPEAKING while the app is
+        # closed. This class was fully implemented and unit-tested but had zero
+        # production callers, so background progress never fired.
+        self._push_policy = PushTriggerPolicy()
 
         # in-flight run tasks: run_id → asyncio.Task
         self._run_tasks: dict[str, asyncio.Task] = {}
@@ -374,10 +394,27 @@ class HeraldRelayClient:
         run_id: str,
         command: str,
     ) -> None:
-        """Forward a command to local Hermes, classify events, POST updates back."""
+        """Forward a command to local Hermes, classify events, POST updates back.
+
+        Three properties matter here, because this is the path that runs while
+        the user's app is closed:
+
+        1. **Quiet by default.** Only signals worth a human's attention leave
+           this loop. IGNORE is dropped entirely rather than POSTed.
+        2. **Periodically audible on long runs.** ``PushTriggerPolicy`` decides
+           when a MILESTONE is worth speaking, so an hour-long task is not
+           silent for an hour.
+        3. **Never silently dead.** A stall watchdog and a
+           ``finally``-guaranteed terminal update mean a crashed/hung Hermes
+           still reaches the user instead of failing closed.
+        """
         classifier = EventClassifier()
         seq = 0
         start_time = time.monotonic()
+        sent_terminal = False
+
+        def _elapsed() -> float:
+            return time.monotonic() - start_time
 
         try:
             # Ensure we have a Hermes session
@@ -396,11 +433,65 @@ class HeraldRelayClient:
             # Always use the relay-assigned run_id for updates so Flutter monitor matches
             actual_run_id = run_id
 
-            # Stream /v1/runs/{id}/events
-            async for raw_event in self._hermes_sse(
+            # Stream /v1/runs/{id}/events, under a stall watchdog. A bare
+            # `async for` over a dead stream blocks forever with no output —
+            # which is exactly the "app is dead and I never hear back" case.
+            stream = self._hermes_sse(
                 f"{self.local_hermes_url}/v1/runs/{actual_run_id}/events"
-            ):
+            ).__aiter__()
+
+            while True:
+                try:
+                    raw_event = await asyncio.wait_for(
+                        stream.__anext__(), timeout=_STALL_TIMEOUT_S
+                    )
+                except StopAsyncIteration:
+                    # Stream ended WITHOUT a terminal event — Hermes died,
+                    # was killed, or the tunnel dropped. Previously this exited
+                    # silently and the user waited forever.
+                    if not sent_terminal:
+                        await self._post_update(client, {
+                            "device_token": self.device_token,
+                            "run_id": actual_run_id,
+                            "seq": seq,
+                            "signal": DONE,
+                            "event": {"type": "run.failed", "data": {}},
+                            "summary": "The task ended unexpectedly — Hermes "
+                                       "stopped sending updates.",
+                            "spoken_text": "Heads up — the task stopped "
+                                           "unexpectedly before finishing.",
+                        })
+                        sent_terminal = True
+                    break
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Hermes stream stalled >%.0fs for run=%s",
+                        _STALL_TIMEOUT_S, actual_run_id,
+                    )
+                    await self._post_update(client, {
+                        "device_token": self.device_token,
+                        "run_id": actual_run_id,
+                        "seq": seq,
+                        "signal": DONE,
+                        "event": {"type": "run.failed", "data": {"reason": "stalled"}},
+                        "summary": (
+                            f"No response from Hermes for "
+                            f"{int(_STALL_TIMEOUT_S / 60)} minutes — the task "
+                            f"may be stuck."
+                        ),
+                        "spoken_text": "Hermes has gone quiet and may be stuck. "
+                                       "You might want to check on it.",
+                    })
+                    sent_terminal = True
+                    break
+
                 classified = classifier.feed(raw_event)
+
+                # IGNORE is the token-stream firehose. Dropping it here is the
+                # single biggest reduction in redundant chatter — it used to be
+                # POSTed to the relay on every delta.
+                if classified.signal == IGNORE:
+                    continue
 
                 update = {
                     "device_token": self.device_token,
@@ -414,29 +505,59 @@ class HeraldRelayClient:
                 if classified.spoken_text:
                     update["spoken_text"] = classified.spoken_text
 
+                # Should this one actually be SPOKEN while the app is closed?
+                # The relay pushes QUESTION/DONE unconditionally; MILESTONE is
+                # rate-limited here so a long run stays audible without
+                # narrating every tool call into the user's pocket.
+                if classified.signal == MILESTONE:
+                    ok, text, _urgency = self._push_policy.should_push(
+                        raw_event, _elapsed(), actual_run_id
+                    )
+                    if ok:
+                        update["spoken_text"] = (
+                            classified.summary or text or "Still working on it."
+                        )
+
                 await self._post_update(client, update)
                 seq += 1
 
                 # On QUESTION: pause and wait for Flutter approval
                 if classified.signal == QUESTION:
                     logger.info("QUESTION signal — waiting for Flutter approval: run=%s", actual_run_id)
-                    approval = await self._wait_for_approval(actual_run_id, timeout=300.0)
+                    approval = await self._wait_for_approval(
+                        actual_run_id, timeout=_APPROVAL_TIMEOUT_S
+                    )
                     if not approval["approved"]:
-                        # User denied — send DONE with denial message
+                        # User denied (or never answered) — send a terminal
+                        # update so Cloud and the user both learn the outcome.
+                        timed_out = approval.get("message") == "timeout"
                         await self._post_update(client, {
                             "device_token": self.device_token,
                             "run_id": actual_run_id,
                             "seq": seq,
                             "signal": DONE,
                             "event": {"type": "approval_denied", "data": {}},
-                            "summary": approval.get("message") or "User denied the request.",
+                            "summary": (
+                                "Timed out waiting for your approval — the task "
+                                "was not run."
+                                if timed_out
+                                else (approval.get("message")
+                                      or "User denied the request.")
+                            ),
+                            "spoken_text": (
+                                "I never heard back on that approval, so I "
+                                "stopped the task."
+                                if timed_out else None
+                            ),
                         })
+                        sent_terminal = True
                         return
                     # Approved — continue streaming (Hermes continues on its own)
                     logger.info("Approval granted: run=%s", actual_run_id)
 
                 # After DONE we're finished
                 if classified.signal == DONE:
+                    sent_terminal = True
                     break
 
         except asyncio.CancelledError:
@@ -452,9 +573,13 @@ class HeraldRelayClient:
                     "signal": DONE,
                     "event": {"type": "error", "data": {"message": str(exc)}},
                     "summary": f"Error: {str(exc)[:200]}",
+                    "spoken_text": f"The task hit an error: {str(exc)[:150]}",
                 })
+                sent_terminal = True
             except Exception:
                 pass
+        finally:
+            self._push_policy.forget(run_id)
 
     async def _ensure_session(self) -> str:
         """Lazily create a Hermes session and cache it."""

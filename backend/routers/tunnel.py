@@ -275,13 +275,38 @@ async def _send_fcm(
         logger.error(f"[FCM] credential error: {exc}")
         return
 
+    payload_data = {k: str(v) for k, v in (data or {}).items()}
+
+    # The Flutter background isolate (`_firebaseMessagingBackgroundHandler`)
+    # only speaks when the DATA payload carries `type`, `message` and
+    # `urgency`. Callers previously sent only {task_id, run_id, signal}, so the
+    # handler's `type == 'herald_burst' || 'herald_question'` check never
+    # matched and **no background push was ever spoken** — the whole
+    # app-is-closed audio path was dead. Derive the contract here so every
+    # caller gets it right.
+    signal = payload_data.get("signal", "")
+    payload_data.setdefault(
+        "type",
+        "herald_question" if signal == "QUESTION" else "herald_burst",
+    )
+    payload_data.setdefault("message", body or title)
+    payload_data.setdefault(
+        "urgency", "high" if signal == "QUESTION" else "low"
+    )
+
     payload: dict = {
         "message": {
             "token": fcm_token,
             "notification": {"title": title, "body": body or ""},
-            "data": {k: str(v) for k, v in (data or {}).items()},
+            "data": payload_data,
+            # `content_available` wakes the background isolate on a killed app;
+            # without it iOS silently drops the wake-up and Android delivery is
+            # best-effort only.
             "android": {"priority": "high"},
-            "apns": {"headers": {"apns-priority": "10"}},
+            "apns": {
+                "headers": {"apns-priority": "10"},
+                "payload": {"aps": {"content-available": 1, "sound": "default"}},
+            },
         }
     }
     try:
@@ -541,7 +566,14 @@ async def tunnel_update(req: TunnelUpdateRequest):
     except Exception as exc:
         logger.warning(f"[tunnel/update] task status update failed (signal={req.signal}): {exc}")
 
-    # --- FCM push for QUESTION / DONE ---
+    # --- FCM push for QUESTION / DONE / spoken MILESTONE ---
+    #
+    # MILESTONE only pushes when the plugin attached ``spoken_text``. The
+    # plugin's PushTriggerPolicy is the rate limiter, so by the time a
+    # milestone carries spoken text it has already been judged worth saying.
+    # Without this branch a long-running task was silent from start to finish
+    # while the app was closed — the user heard nothing for an hour, then
+    # "Task complete".
     if req.signal == "QUESTION":
         await _send_fcm(
             req.device_token,
@@ -554,6 +586,13 @@ async def tunnel_update(req: TunnelUpdateRequest):
             req.device_token,
             title="Task complete",
             body=req.summary or "",
+            data={"task_id": task_id, "run_id": req.run_id, "signal": req.signal},
+        )
+    elif req.signal == "MILESTONE" and req.spoken_text:
+        await _send_fcm(
+            req.device_token,
+            title="Still working",
+            body=req.spoken_text,
             data={"task_id": task_id, "run_id": req.run_id, "signal": req.signal},
         )
 

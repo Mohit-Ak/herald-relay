@@ -37,7 +37,8 @@ class PushTriggerPolicy:
     # elapsed — otherwise a background task would narrate every tool call to a
     # user who isn't even looking at the phone.
     PROGRESS_EVENTS = {
-        "tool.completed", "tool_end", "tool.end", "checkpoint",
+        "tool.progress", "tool.completed", "tool.failed", "milestone",
+        "tool_end", "tool.end", "checkpoint",
     }
 
     def __init__(
@@ -72,6 +73,14 @@ class PushTriggerPolicy:
     def _data(event: dict) -> dict:
         d = event.get("data")
         return d if isinstance(d, dict) else event
+
+    def forget(self, run_id: str) -> None:
+        """Drop per-run rate-limit state once a run is over.
+
+        Without this the ``_last_progress_at`` dict grows unbounded for the
+        life of the plugin process — a slow leak on a long-lived daemon.
+        """
+        self._last_progress_at.pop(run_id, None)
 
     def should_push(
         self, event: dict, run_duration_s: float, run_id: str = ""

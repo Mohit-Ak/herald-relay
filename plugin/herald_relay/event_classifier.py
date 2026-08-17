@@ -45,55 +45,68 @@ class EventClassifier:
     summary for DONE / MILESTONE without an extra LLM call.
     """
 
-    # Events that are pure noise
+    # Events that are pure noise.
+    #
+    # ``message.delta`` is the token-by-token stream — it is BY FAR the highest
+    # volume event Hermes emits (hundreds per run). It was not listed here, so
+    # it fell through to the "unknown type" branch and was classified
+    # ACCUMULATE, meaning every single token chunk was POSTed to the relay as
+    # its own /tunnel/update. That is the "updating every small detail" flood.
+    # Its text is still harvested below for the DONE summary; it is just never
+    # a reason to talk to the user.
     _IGNORE_TYPES = {
+        "message.delta", "message.started", "reasoning.available",
+        "run.started", "run.stopping", "approval.responded",
         "partial",          # streaming tokens — too noisy
-        "tool_start",       # internal
-        "tool.start",
-        "tool_call",
-        "heartbeat",
-        "ping",
-        "comment",
+        "tool.started",     # starts are visual-only; narrating them double-talks
+        "tool_start", "tool.start", "tool_call",
+        "heartbeat", "ping", "comment",
     }
 
-    # Events that are informational but don't warrant waking the user
+    # Events that are informational but don't warrant waking the user.
     _ACCUMULATE_TYPES = {
-        "tool_end",
-        "tool.end",
-        "tool_result",
-        "tool_finished",
-        "checkpoint",
-        "run_state",
+        "tool.completed", "tool.failed", "message.completed",
+        "tool_end", "tool.end", "tool_result", "tool_finished",
+        "checkpoint", "run_state",
     }
 
-    # Events that are noteworthy progress milestones
+    # Events that are noteworthy progress milestones.
     _MILESTONE_TYPES = {
+        "tool.progress",
         "milestone",
         "progress",
     }
 
     # Terminal events
     _DONE_TYPES = {
-        "final",
-        "run_complete",
-        "done",
-        "complete",
-        "run.completed",
+        "run.completed", "run.cancelled",
+        "final", "run_complete", "done", "complete",
     }
 
     # Error terminal events
     _ERROR_TYPES = {
+        "run.failed",
         "error",
         "run_error",
-        "run.failed",
     }
 
     # Question / approval events
     _QUESTION_TYPES = {
-        "approval_required",
         "approval.request",
+        "approval_required",
         "approval",
         "question",
+    }
+
+    # Events whose text must NOT be folded into the answer summary. Scaffolding
+    # and approval prompts are not the assistant's answer; harvesting them makes
+    # the final spoken summary quote the approval question back at the user.
+    _NEVER_HARVEST = {
+        "heartbeat", "ping", "comment",
+        "tool.started", "tool_start", "tool.start", "tool_call",
+        "run.started", "run.stopping",
+        "approval.request", "approval_required", "approval", "question",
+        "approval.responded",
     }
 
     def __init__(self) -> None:
@@ -114,9 +127,23 @@ class EventClassifier:
         if not isinstance(data, dict):
             data = {}
 
-        # Accumulate partial text for summary building
-        text_chunk = data.get("text") or data.get("content") or data.get("message") or ""
-        if text_chunk and etype not in self._IGNORE_TYPES:
+        # Accumulate assistant text for the DONE summary.
+        #
+        # Hermes streams the answer as ``message.delta`` with the chunk under
+        # **``delta``**, not ``text``. That event is IGNORE (too noisy to speak),
+        # but its text is exactly what we need for the final spoken summary, so
+        # harvest it BEFORE the ignore-routing below. Reading only ``text`` and
+        # only for non-ignored events meant the summary was always built from
+        # the tool-name fallback ("Done — ran terminal.") instead of the actual
+        # answer.
+        text_chunk = (
+            data.get("delta")
+            or data.get("text")
+            or data.get("content")
+            or data.get("message")
+            or ""
+        )
+        if text_chunk and etype not in self._NEVER_HARVEST:
             self._text_parts.append(str(text_chunk))
 
         # Track tool names for milestone summary
