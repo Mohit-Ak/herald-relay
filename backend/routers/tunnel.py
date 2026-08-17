@@ -258,6 +258,17 @@ async def _send_fcm(
         logger.warning(f"[FCM] no fcm_token for {device_token[:8]}... – skipping push")
         return
 
+    # Don't waste a network round-trip (and log an alarming 404) on a token
+    # that cannot possibly be real — see is_valid_fcm_token.
+    from routers.push import is_valid_fcm_token  # local import: avoids a cycle
+
+    if not is_valid_fcm_token(fcm_token):
+        logger.warning(
+            f"[FCM] implausible fcm_token (len={len(fcm_token)}) for "
+            f"{device_token[:8]}... – skipping push; device must re-register"
+        )
+        return
+
     if not FCM_PROJECT_ID:
         logger.info(f"[FCM STUB] push → {device_token[:8]}... title={title!r} body={body!r}")
         return
@@ -317,6 +328,24 @@ async def _send_fcm(
                 json=payload,
                 timeout=10.0,
             )
+            # A 404 (or UNREGISTERED) means FCM has permanently retired this
+            # registration — the app was uninstalled, or the token was rotated
+            # or restored onto a different install. Retrying it forever just
+            # fills the log with scary 404s and hides real failures, so drop it
+            # and let the device re-register. This is what keeps the `devices`
+            # collection from silently accumulating dead tokens.
+            if resp.status_code == 404 or "UNREGISTERED" in resp.text.upper():
+                logger.warning(
+                    f"[FCM] token for {device_token[:8]}... is no longer "
+                    f"registered — clearing it (device must re-register)"
+                )
+                try:
+                    db.collection("devices").document(device_token).update(
+                        {"fcm_token": None}
+                    )
+                except Exception as clear_exc:
+                    logger.warning(f"[FCM] could not clear stale token: {clear_exc}")
+                return
             resp.raise_for_status()
         logger.info(f"[FCM] push sent to {device_token[:8]}...")
     except Exception as exc:

@@ -12,6 +12,23 @@ RELAY_URL = os.getenv("HERALD_RELAY_URL", "wss://relay.herald.app")
 FCM_PROJECT_ID = os.getenv("FCM_PROJECT_ID", "")
 FREE_BURSTS = 20
 
+# A real FCM registration token is a long opaque string (typically 140-180+
+# chars). Device records in production accumulated junk in this field —
+# "android", a bare uuid, None — from manual curls and from re-registrations
+# that posted no token. Pushing to those returns 404 from FCM and, worse, they
+# overwrote tokens that actually worked. 100 is a deliberately loose floor:
+# comfortably below any genuine token, far above every placeholder seen.
+_MIN_FCM_TOKEN_LEN = 100
+
+
+def is_valid_fcm_token(token: Optional[str]) -> bool:
+    """True if *token* is plausibly a real FCM registration token.
+
+    Used to decide whether an incoming token may replace a stored one, and to
+    skip devices that can never receive a push.
+    """
+    return bool(token) and len(token.strip()) >= _MIN_FCM_TOKEN_LEN
+
 
 class RegisterRequest(BaseModel):
     device_token: Optional[str] = None  # None = create new
@@ -78,9 +95,26 @@ async def register_device(req: RegisterRequest, request: Request):
     existing_doc = ref.get()
     existing = existing_doc.to_dict() if existing_doc.exists else {}
 
+    # NEVER clobber a good FCM token with a missing or junk one.
+    #
+    # `fcm_token` is optional (the Flutter connect screen posts only
+    # {platform, plan}), and this used an unconditional set(), so a plain
+    # re-registration wrote fcm_token=None straight over a working token and
+    # silently disabled background push for that device forever. Placeholder
+    # values from tests/manual curl ("android", a bare uuid) did the same.
+    # Real FCM registration tokens are long (>100 chars); anything shorter is
+    # not a token we can push to, so it must never displace one that is.
+    incoming = (req.fcm_token or "").strip()
+    fcm_token = incoming if is_valid_fcm_token(incoming) else existing.get("fcm_token")
+    if incoming and not is_valid_fcm_token(incoming):
+        logger.warning(
+            "Ignoring implausible fcm_token (len=%d) for %s... — keeping existing",
+            len(incoming), token[:8],
+        )
+
     ref.set({
         "device_token": token,
-        "fcm_token": req.fcm_token,
+        "fcm_token": fcm_token,
         "platform": req.platform,
         "plan": req.plan,
         "relay_url": relay_url,
@@ -89,7 +123,10 @@ async def register_device(req: RegisterRequest, request: Request):
         "registered_at": existing.get("registered_at", now),
         "last_seen": now,
     })
-    logger.info(f"Registered device {token[:8]}... platform={req.platform} plan={req.plan}")
+    logger.info(
+        f"Registered device {token[:8]}... platform={req.platform} "
+        f"plan={req.plan} push={'yes' if fcm_token else 'NO'}"
+    )
     return {"device_token": token, "relay_url": relay_url}
 
 

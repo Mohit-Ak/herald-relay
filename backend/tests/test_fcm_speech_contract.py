@@ -34,7 +34,9 @@ def _capture_payload(monkeypatch, *, title, body, data):
 
         @staticmethod
         def to_dict():
-            return {"fcm_token": "fcm-abc"}
+            # Must be a plausible-length token: _send_fcm now skips tokens too
+            # short to be real (see is_valid_fcm_token / token hygiene tests).
+            return {"fcm_token": "f" * 152}
 
     class _Col:
         def document(self, _t):
