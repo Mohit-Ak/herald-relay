@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from typing import Optional
@@ -31,6 +32,18 @@ logger = logging.getLogger(__name__)
 # Two routers: router (prefix /tunnel) and monitor_router (prefix "")
 # ---------------------------------------------------------------------------
 router = APIRouter(tags=["tunnel"])           # mounted at /tunnel in main.py
+
+# Ring-and-answer-automatically for blocked runs.
+#
+# When Hermes is BLOCKED on an approval it is worth ringing the phone rather
+# than filing a notification that sits unread. With auto-answer on, Herald
+# accepts on the user's behalf after a short grace period so the conversation
+# resumes hands-free — the "don't make me take my phone out" case. The call UI
+# still appears briefly, so it can always be declined.
+#
+# Off by default would make the feature invisible; on by default matches the
+# stated intent. Set HERALD_CALL_AUTO_ANSWER=0 to require a manual answer.
+_AUTO_ANSWER = os.getenv("HERALD_CALL_AUTO_ANSWER", "1") not in ("0", "false", "False")
 monitor_router = APIRouter(tags=["monitor"])  # mounted at / in main.py
 
 # ---------------------------------------------------------------------------
@@ -604,11 +617,31 @@ async def tunnel_update(req: TunnelUpdateRequest):
     # while the app was closed — the user heard nothing for an hour, then
     # "Task complete".
     if req.signal == "QUESTION":
+        # A blocked run is the one case worth RINGING the device: Hermes cannot
+        # continue until the user answers. `herald_call` makes the client raise
+        # a real incoming call (full-screen intent over the lockscreen) instead
+        # of a notification that can sit unread for an hour.
+        #
+        # The server does not — and cannot — dial the phone: a swiped-away app
+        # has no listening process. This push is what wakes it; the CLIENT then
+        # presents the call and redials WebRTC on accept. Same model as
+        # Teams/Meet.
         await _send_fcm(
             req.device_token,
             title="Hermes needs your input",
             body=req.spoken_text or "",
-            data={"task_id": task_id, "run_id": req.run_id, "signal": req.signal},
+            data={
+                "task_id": task_id,
+                "run_id": req.run_id,
+                "signal": req.signal,
+                "type": "herald_call",
+                "message": req.spoken_text or "Hermes needs your input",
+                "urgency": "high",
+                # Hands-free: answer automatically so the user doesn't have to
+                # take the phone out. The client still shows the call UI briefly
+                # so it can be declined.
+                "auto_answer": "true" if _AUTO_ANSWER else "false",
+            },
         )
     elif req.signal == "DONE":
         await _send_fcm(
