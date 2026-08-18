@@ -23,7 +23,7 @@ plugins:
 
     # ── BYOK mode only ──────────────────────────────────────────────
     # gemini_api_key: "AIzaSyXXXXXXX"    # Google AI Studio key
-    # gemini_model: "gemini-1.5-flash"   # Optional — default shown
+    # gemini_model: "gemini-3.1-flash-live-preview"  # Optional — default shown
 
     # ── Relay connection ────────────────────────────────────────────
     # relay_url: "wss://relay.herald.dev" # Default — override for self-hosted
@@ -62,7 +62,7 @@ plugins:
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `gemini_api_key` | string | — | Your Google AI Studio API key. Get one free at [aistudio.google.com](https://aistudio.google.com/app/apikey). |
-| `gemini_model` | string | `"gemini-1.5-flash"` | Which Gemini model to use for STT post-processing and TTS. `gemini-1.5-flash` is recommended for cost; `gemini-1.5-pro` for quality. |
+| `gemini_model` | string | `"gemini-3.1-flash-live-preview"` | Which Gemini model backs the voice session. It **must** support `bidiGenerateContent` (the Live websocket) — as of Aug 2026 only `gemini-3.1-flash-live-preview` and `gemini-3.5-live-translate-preview` do. Newer text models such as `gemini-3.6-flash` / `gemini-3.7-flash` support `generateContent` only and will NOT work for voice. The 1.x and 2.x models named here previously are retired and now return 404. |
 
 ### Relay connection options
 
