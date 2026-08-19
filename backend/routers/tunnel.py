@@ -644,18 +644,43 @@ async def tunnel_update(req: TunnelUpdateRequest):
             },
         )
     elif req.signal == "DONE":
+        # The FCM data payload is a CONTRACT: the client's handler dispatches on
+        # `type` and speaks `message`/`urgency`. A payload without them is
+        # delivered by FCM, logged here as a success, and then silently dropped
+        # by the client — which is exactly how "a long task finished and the
+        # user was never told" happens. Send the full envelope.
+        summary = req.summary or req.spoken_text or "Your task is done."
         await _send_fcm(
             req.device_token,
             title="Task complete",
-            body=req.summary or "",
-            data={"task_id": task_id, "run_id": req.run_id, "signal": req.signal},
+            body=summary,
+            data={
+                "task_id": task_id,
+                "run_id": req.run_id,
+                "signal": req.signal,
+                "session_id": getattr(req, "session_id", "") or "",
+                "type": "herald_burst",
+                "message": summary,
+                # A finished task the user walked away from is worth speaking
+                # aloud, but it must not preempt live speech the way an
+                # approval does — the work is already complete.
+                "urgency": "low",
+            },
         )
     elif req.signal == "MILESTONE" and req.spoken_text:
         await _send_fcm(
             req.device_token,
             title="Still working",
             body=req.spoken_text,
-            data={"task_id": task_id, "run_id": req.run_id, "signal": req.signal},
+            data={
+                "task_id": task_id,
+                "run_id": req.run_id,
+                "signal": req.signal,
+                "session_id": getattr(req, "session_id", "") or "",
+                "type": "herald_burst",
+                "message": req.spoken_text,
+                "urgency": "low",
+            },
         )
 
     # --- Forward to Flutter SSE monitor (skip IGNORE) ---
