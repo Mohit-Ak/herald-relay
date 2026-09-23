@@ -86,8 +86,35 @@ curl https://34.173.138.246/health
 ```
 
 ### Install Hermes plugin
+
+One command on any Linux machine running a Hermes `api_server`:
+
 ```bash
 pip install hermes-herald
+herald-tunnel setup        # registers this device, writes ~/.hermes config,
+                           # installs + starts a systemd user unit
+herald-tunnel status       # proves local Hermes → relay → tunnel end to end
+```
+
+`setup` is idempotent — re-running keeps the existing device token (pass
+`--new-token` to rotate it), so a reinstall never orphans a token that a
+phone, kiosk, or server-side allowlist already references. User units stop
+at logout unless lingering is on: `sudo loginctl enable-linger $USER`.
+
+`status` also prints the **device-scoped base URL** for this machine:
+
+```
+http://<relay>:8082/hermes/d/<device_token>
+```
+
+Give that URL to anything that needs to reach *this* Hermes through the
+relay (e.g. Herald's `hermes_url` at `/rtc/connect`). The path form exists
+because callers like `HermesClient` concatenate `base_url + path` and strip
+query strings — a `?device_token=` base cannot survive that, and with two or
+more devices connected the tokenless single-tenant fallback 400s.
+
+Manual alternative (no console script):
+```bash
 hermes config set herald.relay_url https://34.173.138.246
 hermes config set herald.device_token <your-token-from-app>
 ```
