@@ -226,6 +226,61 @@ async def approve_run(run_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Device-scoped addressing — /hermes/d/{device_token}/**
+# ---------------------------------------------------------------------------
+#
+# The single-tenant fallback in _device_token() only works while exactly ONE
+# plugin is connected. The moment a second Hermes host dials in (e.g. a kiosk
+# alongside a laptop) EVERY tokenless call starts failing with
+# "400 Missing device_token header or query param" — including calls from the
+# Herald backend, which has no way to send one: HermesClient builds URLs as
+# f"{base_url}{path}", and normalize_hermes_base_url() strips any query string
+# precisely because a query in the base would land before the path.
+#
+# Putting the token in the PATH is the only form that survives that
+# concatenation, so a caller can address one specific tunnel with a clean base
+# URL:  http://relay:8082/hermes/d/<device_token>
+#
+# Declared BEFORE the generic catch-all below, which would otherwise swallow
+# "d/<token>/..." as an ordinary Hermes path.
+@router.api_route(
+    "/d/{device_token}/{full_path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+)
+async def device_scoped(device_token: str, full_path: str, request: Request):
+    if not _is_connected(device_token):
+        _offline_response()
+
+    body = None
+    if request.method in ("POST", "PUT", "PATCH"):
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+
+    path = "/" + full_path.lstrip("/")
+    query = request.url.query
+    if query:
+        kept = "&".join(
+            p for p in query.split("&") if not p.startswith("device_token=")
+        )
+        if kept:
+            path = f"{path}?{kept}"
+
+    # SSE endpoints must stream, not buffer — a run's events arrive over the
+    # life of the run and the client renders them incrementally.
+    is_sse = full_path.rstrip("/") == "v1/runs" and request.method == "POST"
+    is_sse = is_sse or full_path.endswith("/events")
+    if is_sse:
+        return StreamingResponse(
+            _sse_generator(device_token, request.method, path, body, {}),
+            media_type="text/event-stream",
+        )
+
+    return await _proxy(device_token, request.method, path, body)
+
+
+# ---------------------------------------------------------------------------
 # Generic passthrough — MUST be declared last so the explicit routes above win.
 # ---------------------------------------------------------------------------
 #
