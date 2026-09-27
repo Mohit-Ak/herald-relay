@@ -25,6 +25,48 @@ router = APIRouter(prefix="/hermes", tags=["hermes-proxy"])
 
 SSE_PATHS = {"/v1/runs", "/v1/chat/completions"}
 
+# Request headers the relay is allowed to carry through to the caller's local
+# Hermes. Deliberately an allowlist, not a blocklist.
+#
+# WHY THIS EXISTS
+# ---------------
+# Hermes multiplexes profiles on one port (``/p/<profile>/**``) and each named
+# profile has its OWN ``API_SERVER_KEY``, failing CLOSED when the key does not
+# match. The tunnel client, however, is constructed with a single key (the
+# default profile's) and stamped it onto every forwarded call, so a QR code
+# advertising "one scan adds all 6 agents" produced 5 agents that answered 401
+# through the relay while working fine on the LAN.
+#
+# Forwarding the CALLER's Authorization fixes that: the caller already holds a
+# per-profile key, the local gateway is the thing that validates it, and the
+# relay stays a dumb pipe. The plugin falls back to its local key when this
+# header is absent, so older clients keep working.
+#
+# Hop-by-hop and framing headers (Host, Content-Length, Connection, …) must NOT
+# be forwarded: the plugin builds its own request and a stale Content-Length
+# would corrupt it.
+_FORWARDABLE_HEADERS = ("authorization", "x-hermes-key")
+
+
+def _caller_headers(request: Request) -> dict:
+    """Auth headers from the inbound request, for the caller's local Hermes.
+
+    ``X-Hermes-Key`` is accepted as an alias so a client that only speaks the
+    Herald backend's header convention still authenticates the right profile.
+    """
+    out: dict = {}
+    for name in _FORWARDABLE_HEADERS:
+        value = request.headers.get(name)
+        if not value:
+            continue
+        if name == "x-hermes-key":
+            # Never let the alias override an explicit Authorization.
+            out.setdefault("Authorization", f"Bearer {value}")
+        else:
+            out["Authorization"] = value
+    return out
+
+
 
 def _device_token(request: Request) -> str:
     token = (
@@ -117,7 +159,9 @@ async def hermes_health_detailed(request: Request):
             "relay_connected": False,
         }
     try:
-        result = await tunnel_mod.forward_http(token, "GET", "/health", None, {})
+        result = await tunnel_mod.forward_http(
+            token, "GET", "/health", None, _caller_headers(request)
+        )
         return {
             "status": "ok",
             "hermes_connected": True,
@@ -134,7 +178,7 @@ async def get_models(request: Request):
     token = _device_token(request)
     if not _is_connected(token):
         _offline_response()
-    return await _proxy(token, "GET", "/v1/models")
+    return await _proxy(token, "GET", "/v1/models", None, _caller_headers(request))
 
 
 @router.get("/v1/channels")
@@ -142,7 +186,7 @@ async def get_channels(request: Request):
     token = _device_token(request)
     if not _is_connected(token):
         _offline_response()
-    return await _proxy(token, "GET", "/v1/channels")
+    return await _proxy(token, "GET", "/v1/channels", None, _caller_headers(request))
 
 
 async def _sse_generator(token: str, method: str, path: str, body, headers: dict):
@@ -193,7 +237,8 @@ async def start_run(request: Request):
         _offline_response()
     body = await request.json()
     return StreamingResponse(
-        _sse_generator(token, "POST", "/v1/runs", body, {}), media_type="text/event-stream"
+        _sse_generator(token, "POST", "/v1/runs", body, _caller_headers(request)),
+        media_type="text/event-stream",
     )
 
 
@@ -203,7 +248,7 @@ async def run_events(run_id: str, request: Request):
     if not _is_connected(token):
         _offline_response()
     return StreamingResponse(
-        _sse_generator(token, "GET", f"/v1/runs/{run_id}/events", None, {}),
+        _sse_generator(token, "GET", f"/v1/runs/{run_id}/events", None, _caller_headers(request)),
         media_type="text/event-stream",
     )
 
@@ -213,7 +258,7 @@ async def stop_run(run_id: str, request: Request):
     token = _device_token(request)
     if not _is_connected(token):
         _offline_response()
-    return await _proxy(token, "POST", f"/v1/runs/{run_id}/stop")
+    return await _proxy(token, "POST", f"/v1/runs/{run_id}/stop", None, _caller_headers(request))
 
 
 @router.post("/v1/runs/{run_id}/approval")
@@ -222,7 +267,9 @@ async def approve_run(run_id: str, request: Request):
     if not _is_connected(token):
         _offline_response()
     body = await request.json()
-    return await _proxy(token, "POST", f"/v1/runs/{run_id}/approval", body)
+    return await _proxy(
+        token, "POST", f"/v1/runs/{run_id}/approval", body, _caller_headers(request)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -271,13 +318,14 @@ async def device_scoped(device_token: str, full_path: str, request: Request):
     # life of the run and the client renders them incrementally.
     is_sse = full_path.rstrip("/") == "v1/runs" and request.method == "POST"
     is_sse = is_sse or full_path.endswith("/events")
+    headers = _caller_headers(request)
     if is_sse:
         return StreamingResponse(
-            _sse_generator(device_token, request.method, path, body, {}),
+            _sse_generator(device_token, request.method, path, body, headers),
             media_type="text/event-stream",
         )
 
-    return await _proxy(device_token, request.method, path, body)
+    return await _proxy(device_token, request.method, path, body, headers)
 
 
 # ---------------------------------------------------------------------------
@@ -317,4 +365,4 @@ async def passthrough(full_path: str, request: Request):
         if kept:
             path = f"{path}?{kept}"
 
-    return await _proxy(token, request.method, path, body)
+    return await _proxy(token, request.method, path, body, _caller_headers(request))

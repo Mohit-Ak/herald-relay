@@ -91,11 +91,28 @@ class HeraldRelayClient:
         # approval queues: run_id → asyncio.Queue  (for QUESTION/approval flow)
         self._approval_queues: dict[str, asyncio.Queue] = {}
 
-    def _hermes_headers(self) -> dict:
-        """Auth headers for calls into the LOCAL Hermes api_server."""
+    def _hermes_headers(self, forwarded: dict | None = None) -> dict:
+        """Auth headers for calls into the LOCAL Hermes api_server.
+
+        *forwarded* carries the headers the relay allowlisted from the ORIGINAL
+        caller. Prefer them: Hermes multiplexes profiles on one port and each
+        named profile has its own ``API_SERVER_KEY``, failing closed on a
+        mismatch. This client only knows the DEFAULT profile's key, so stamping
+        it onto every call made ``/p/<profile>/**`` answer 401 through the relay
+        while the identical request succeeded on the LAN — the "one QR adds all
+        your agents" promise was false for every named profile.
+
+        Falls back to the local key when the caller sent nothing, so an older
+        relay that does not forward headers keeps working.
+        """
+        if forwarded:
+            for name, value in forwarded.items():
+                if name.lower() == "authorization" and value:
+                    return {"Authorization": value}
         if self.hermes_key:
             return {"Authorization": f"Bearer {self.hermes_key}"}
         return {}
+
 
     # ------------------------------------------------------------------
     # Public API
@@ -210,12 +227,16 @@ class HeraldRelayClient:
         path = payload.get("path") or "/"
         body = payload.get("body")
         wants_stream = bool(payload.get("stream"))
+        # Auth the ORIGINAL caller presented, allowlisted by the relay. Needed
+        # so per-profile keys reach the multiplexed gateway — see
+        # _hermes_headers().
+        forwarded = payload.get("headers") or {}
 
         url = f"{self.local_hermes_url}{path}"
 
         if wants_stream:
             await self._forward_streaming(client, request_id, method, url, body,
-                                          path)
+                                          path, forwarded)
             return
 
         result: dict = {"device_token": self.device_token, "request_id": request_id}
@@ -224,7 +245,7 @@ class HeraldRelayClient:
                 method,
                 url,
                 json=body if body is not None else None,
-                headers=self._hermes_headers(),
+                headers=self._hermes_headers(forwarded),
                 timeout=30.0,
             )
             try:
@@ -251,6 +272,7 @@ class HeraldRelayClient:
         url: str,
         body: dict | None,
         path: str,
+        forwarded: dict | None = None,
     ) -> None:
         """Relay an SSE response upstream chunk-by-chunk, live."""
         endpoint = f"{self.relay_url}/tunnel/http_stream"
@@ -272,7 +294,7 @@ class HeraldRelayClient:
                 logger.warning("stream chunk push failed: %s", exc)
 
         try:
-            headers = dict(self._hermes_headers())
+            headers = dict(self._hermes_headers(forwarded))
             headers["Accept"] = "text/event-stream"
             async with client.stream(
                 method,
