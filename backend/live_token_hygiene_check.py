@@ -10,7 +10,7 @@ import json
 import urllib.error
 import urllib.request
 
-RELAY = "http://34.173.138.246:8082"
+RELAY = "https://herald-api.eventhorizonlabs.xyz"
 REAL = "z" * 152
 
 

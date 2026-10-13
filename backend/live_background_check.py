@@ -11,7 +11,7 @@ import json
 import urllib.error
 import urllib.request
 
-RELAY = "http://34.173.138.246:8082"
+RELAY = "https://herald-api.eventhorizonlabs.xyz"
 DEVICE = "52b6f5f8-6269-41a0-8dc5-a8bfa0f20c84"
 RUN = "livecheck-run-1"
 
