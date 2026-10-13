@@ -17,15 +17,11 @@ concurrency:
 
 env:
   PROJECT: eh-voice-ai
-  # NOTE: `mailmind-rtc` is the pre-pivot GCE VM's immutable name, kept as an
-  # opaque host id. GCE can't rename a VM in place; renaming would require
-  # recreating the box from a machine image + re-pointing the IP (downtime).
-  # This string is LOAD-BEARING — changing it to `herald-rtc` breaks CD because
-  # that instance does not exist. Verify with:
-  #   gcloud compute instances list --project=eh-voice-ai
-  # Everything ON the box is correctly named herald-*: the systemd unit
-  # (herald-relay), the env file (/etc/herald-relay.env), and /opt/herald-relay.
-  VM_NAME: mailmind-rtc
+  # Production VM `herald-api` (replaced the pre-pivot box in Oct 2026; same
+  # static IP and hostname herald-api.eventhorizonlabs.xyz). On the box: unit
+  # herald-relay, env /etc/herald-relay.env, code /opt/herald-relay.
+  # Verify with: gcloud compute instances list --project=eh-voice-ai
+  VM_NAME: herald-api
   VM_ZONE: us-central1-a
 
 jobs:

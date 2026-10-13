@@ -80,8 +80,8 @@ Hermes emits QUESTION
 
 ### Herald Cloud (GCE)
 ```bash
-# Backend is live at 34.173.138.246
-curl https://34.173.138.246/health
+# Backend is live at herald-api.eventhorizonlabs.xyz
+curl https://herald-api.eventhorizonlabs.xyz/health
 # {"status":"ok","service":"herald-relay","connected_devices":0}
 ```
 
@@ -115,7 +115,7 @@ more devices connected the tokenless single-tenant fallback 400s.
 
 Manual alternative (no console script):
 ```bash
-hermes config set herald.relay_url https://34.173.138.246
+hermes config set herald.relay_url https://herald-api.eventhorizonlabs.xyz
 hermes config set herald.device_token <your-token-from-app>
 ```
 
@@ -149,7 +149,7 @@ backend/.venv/bin/python -m pytest tests/test_e2e.py -v   # 1 test, ~2.3s
 
 ## Deployment (GCE)
 
-Files are deployed to `/opt/herald-relay/` on the GCE VM **`mailmind-rtc`**
+Files are deployed to `/opt/herald-relay/` on the GCE VM **`herald-api`**
 (us-central1-a, project `eh-voice-ai`). The VM name is a legacy, immutable host
 id from before the Herald pivot — kept as an opaque identifier because GCE can't
 rename a VM in place. Nothing user-facing exposes it.
@@ -157,10 +157,10 @@ rename a VM in place. Nothing user-facing exposes it.
 ```bash
 # Deploy updated router
 gcloud compute scp backend/routers/tunnel.py \
-  mailmind-rtc:/opt/herald-relay/routers/tunnel.py \
+  herald-api:/opt/herald-relay/routers/tunnel.py \
   --zone us-central1-a --project eh-voice-ai
 
-gcloud compute ssh mailmind-rtc --zone us-central1-a --project eh-voice-ai \
+gcloud compute ssh herald-api --zone us-central1-a --project eh-voice-ai \
   --command "sudo systemctl restart herald-relay"
 ```
 

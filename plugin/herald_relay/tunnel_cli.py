@@ -36,7 +36,7 @@ from .relay_client import HeraldRelayClient
 logger = logging.getLogger("herald-tunnel")
 
 HERMES_HOME = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
-DEFAULT_RELAY = "http://34.173.138.246:8082"
+DEFAULT_RELAY = "https://herald-api.eventhorizonlabs.xyz"
 
 UNIT_NAME = "herald-tunnel.service"
 UNIT_TEMPLATE = """\
