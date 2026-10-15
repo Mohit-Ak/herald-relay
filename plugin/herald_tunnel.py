@@ -93,8 +93,17 @@ async def main() -> int:
         local_hermes_url=local_hermes,
         hermes_key=key,
     )
-    # run_forever() already handles reconnect with exponential backoff.
-    await client.run_forever()
+    # herald.edge_url set -> hold ONE hibernating WebSocket to the Herald edge
+    # relay (idle costs nothing) instead of a long-lived SSE stream against the
+    # GCE relay. The relay still addresses this device by the same token and
+    # falls back to the edge, so the phone and backend need no change.
+    edge_url = cfg.get("edge_url") or os.getenv("HERALD_EDGE_URL", "")
+    if edge_url:
+        logger.info("transport=edge edge=%s", edge_url)
+        await client.run_edge(edge_url)
+    else:
+        # run_forever() already handles reconnect with exponential backoff.
+        await client.run_forever()
     return 0
 
 

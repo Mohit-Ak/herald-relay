@@ -179,36 +179,77 @@ class HeraldRelayClient:
             async for task_payload in self._event_stream(client):
                 if not self._running:
                     break
-                ptype = task_payload.get("type", "")
-                if ptype == "task":
-                    task = task_payload.get("task", {})
-                    task_id = task.get("task_id", str(uuid.uuid4()))
-                    command = task.get("command", "")
-                    run_id = task.get("run_id") or str(uuid.uuid4())
-                    logger.info("Received A2A task %s: %r", task_id, command[:80])
-                    # Spawn run in background so we keep reading the SSE stream
-                    t = asyncio.create_task(
-                        self._execute_and_stream(client, task_id, run_id, command)
-                    )
-                    self._run_tasks[run_id] = t
-                    t.add_done_callback(lambda ft, rid=run_id: self._run_tasks.pop(rid, None))
-                elif ptype == "approval":
-                    # Flutter approved/denied a QUESTION — unblock the waiting run
-                    approval_data = task_payload.get("data", task_payload)
-                    run_id = approval_data.get("run_id", "")
-                    approved = approval_data.get("approved", False)
-                    logger.info("Approval received: run=%s approved=%s", run_id, approved)
-                    # Signal any waiting coroutine via the approval event queue
-                    q = self._approval_queues.get(run_id)
-                    if q:
-                        await q.put({"approved": approved, "message": approval_data.get("message")})
-                elif ptype == "forward_request":
-                    # Cloud is proxying an HTTP call from the phone (/hermes/*)
-                    # down to this machine's Hermes. Handle out-of-band so a slow
-                    # request never stalls the event stream.
-                    asyncio.create_task(
-                        self._handle_forward_request(client, task_payload)
-                    )
+                await self._handle_payload(client, task_payload)
+
+    async def _handle_payload(self, client: httpx.AsyncClient, task_payload: dict) -> None:
+        """One server-pushed message (task / approval / forward_request).
+
+        Shared by the SSE tunnel and the edge tunnel: the edge delivers the
+        same payloads as WebSocket ``event`` frames.
+        """
+        if not isinstance(task_payload, dict):
+            return
+        ptype = task_payload.get("type", "")
+        if ptype == "task":
+            task = task_payload.get("task", {})
+            task_id = task.get("task_id", str(uuid.uuid4()))
+            command = task.get("command", "")
+            run_id = task.get("run_id") or str(uuid.uuid4())
+            logger.info("Received A2A task %s: %r", task_id, command[:80])
+            # Spawn run in background so we keep reading the stream
+            t = asyncio.create_task(
+                self._execute_and_stream(client, task_id, run_id, command)
+            )
+            self._run_tasks[run_id] = t
+            t.add_done_callback(lambda ft, rid=run_id: self._run_tasks.pop(rid, None))
+        elif ptype == "approval":
+            # Flutter approved/denied a QUESTION — unblock the waiting run
+            approval_data = task_payload.get("data", task_payload)
+            run_id = approval_data.get("run_id", "")
+            approved = approval_data.get("approved", False)
+            logger.info("Approval received: run=%s approved=%s", run_id, approved)
+            q = self._approval_queues.get(run_id)
+            if q:
+                await q.put({"approved": approved, "message": approval_data.get("message")})
+        elif ptype == "forward_request":
+            # Cloud is proxying an HTTP call from the phone (/hermes/*)
+            # down to this machine's Hermes. Handle out-of-band so a slow
+            # request never stalls the event stream.
+            asyncio.create_task(self._handle_forward_request(client, task_payload))
+
+    async def run_edge(self, edge_url: str) -> None:
+        """Run over the Herald edge relay instead of the long-lived SSE stream.
+
+        The device holds one hibernating WebSocket to the edge; nothing stays
+        open against the GCE relay. Requests from the phone arrive on that
+        socket (EdgeTunnel answers them against local Hermes), and server
+        pushes (tasks, approvals) arrive as ``event`` frames routed through
+        ``_handle_payload``. Classified updates still POST to the relay.
+        """
+        from herald_relay.edge_tunnel import EdgeTunnel  # noqa: PLC0415
+
+        self._running = True
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0),
+        ) as client:
+            try:
+                await self._register(client)
+            except Exception as exc:  # noqa: BLE001
+                # Registration only refreshes the agent card; the edge path
+                # works without it, so a relay blip must not keep us offline.
+                logger.warning("relay register failed (continuing on edge): %s", exc)
+
+            async def on_event(data):
+                await self._handle_payload(client, data)
+
+            async def on_connect():
+                await self._flush_pending_approvals(client)
+
+            self._edge = EdgeTunnel(edge_url, self.device_token,
+                                    self.local_hermes_url, self.hermes_key)
+            self._edge.on_event = on_event
+            self._edge.on_connect = on_connect
+            await self._edge.run_forever()
 
     async def _handle_forward_request(
         self, client: httpx.AsyncClient, payload: dict

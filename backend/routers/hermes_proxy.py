@@ -14,6 +14,7 @@ back to the WebSocket relay when one is registered, so both transports work.
 from fastapi import APIRouter, Request, Response, HTTPException
 from fastapi.responses import StreamingResponse
 from services.relay_manager import relay_manager
+from services import edge_client
 from routers import tunnel as tunnel_mod
 import asyncio
 import json
@@ -91,9 +92,14 @@ def _device_token(request: Request) -> str:
     return token
 
 
-def _is_connected(token: str) -> bool:
-    """Connected over EITHER transport."""
+def _is_local(token: str) -> bool:
+    """Connected to THIS relay (SSE tunnel or legacy WebSocket)."""
     return tunnel_mod.is_plugin_connected(token) or relay_manager.is_connected(token)
+
+
+async def _is_connected(token: str) -> bool:
+    """Connected here, or on the edge relay (see services/edge_client.py)."""
+    return _is_local(token) or await edge_client.is_online(token)
 
 
 def _offline_response() -> NoReturn:
@@ -135,13 +141,25 @@ async def _proxy(token: str, method: str, path: str, body=None, headers: dict | 
                     media_type="application/json",
                     status_code=item["status"],
                 )
+
+    if await edge_client.is_online(token):
+        try:
+            status, content, ctype = await edge_client.request(token, method, path, body, headers)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[edge] %s %s failed: %s", method, path, exc)
+            raise HTTPException(504, detail={"error": "hermes_timeout",
+                                             "message": "Local Hermes did not respond in time."})
+        if status == 503:
+            _offline_response()
+        return Response(content=content, media_type=ctype.split(";")[0] or "application/json",
+                        status_code=status)
     _offline_response()
 
 
 @router.get("/health")
 async def hermes_health(request: Request):
     token = _device_token(request)
-    connected = _is_connected(token)
+    connected = await _is_connected(token)
     # Return relay connection status immediately — don't block on a tunnel round-trip.
     # Flutter uses this to show the "Hermes connected" indicator.
     return {"hermes_connected": connected, "relay_connected": connected}
@@ -151,13 +169,22 @@ async def hermes_health(request: Request):
 async def hermes_health_detailed(request: Request):
     """Debug-panel health. Herald's HermesClient.health() calls this path."""
     token = _device_token(request)
-    connected = _is_connected(token)
+    connected = await _is_connected(token)
     if not connected:
         return {
             "status": "offline",
             "hermes_connected": False,
             "relay_connected": False,
         }
+    if not _is_local(token):
+        try:
+            status, content, _ = await edge_client.request(
+                token, "GET", "/health", None, _caller_headers(request))
+            return {"status": "ok" if status == 200 else "degraded", "hermes_connected": True,
+                    "relay_connected": True, "transport": "edge",
+                    "hermes": json.loads(content or b"null") if status == 200 else None}
+        except Exception:  # noqa: BLE001
+            return {"status": "degraded", "hermes_connected": True, "relay_connected": True}
     try:
         result = await tunnel_mod.forward_http(
             token, "GET", "/health", None, _caller_headers(request)
@@ -176,7 +203,7 @@ async def hermes_health_detailed(request: Request):
 @router.get("/v1/models")
 async def get_models(request: Request):
     token = _device_token(request)
-    if not _is_connected(token):
+    if not await _is_connected(token):
         _offline_response()
     return await _proxy(token, "GET", "/v1/models", None, _caller_headers(request))
 
@@ -184,7 +211,7 @@ async def get_models(request: Request):
 @router.get("/v1/channels")
 async def get_channels(request: Request):
     token = _device_token(request)
-    if not _is_connected(token):
+    if not await _is_connected(token):
         _offline_response()
     return await _proxy(token, "GET", "/v1/channels", None, _caller_headers(request))
 
@@ -217,6 +244,17 @@ async def _sse_generator(token: str, method: str, path: str, body, headers: dict
         yield "data: [DONE]\n\n"
         return
 
+    if not relay_manager.is_connected(token) and await edge_client.is_online(token):
+        # Verbatim passthrough: the device streams Hermes' own SSE framing
+        # (including ``id:`` lines that Last-Event-ID resume depends on).
+        try:
+            async for text in edge_client.stream(token, method, path, body, headers):
+                yield text
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[edge] stream %s %s failed: %s", method, path, exc)
+            yield f"data: {json.dumps({'error': 'device_offline'})}\n\n"
+        return
+
     async for item in relay_manager.forward_request(token, method, path, body, headers):
         if item["type"] == "sse_chunk":
             yield item["data"]
@@ -233,7 +271,7 @@ async def _sse_generator(token: str, method: str, path: str, body, headers: dict
 @router.post("/v1/runs")
 async def start_run(request: Request):
     token = _device_token(request)
-    if not _is_connected(token):
+    if not await _is_connected(token):
         _offline_response()
     body = await request.json()
     return StreamingResponse(
@@ -245,7 +283,7 @@ async def start_run(request: Request):
 @router.get("/v1/runs/{run_id}/events")
 async def run_events(run_id: str, request: Request):
     token = _device_token(request)
-    if not _is_connected(token):
+    if not await _is_connected(token):
         _offline_response()
     return StreamingResponse(
         _sse_generator(token, "GET", f"/v1/runs/{run_id}/events", None, _caller_headers(request)),
@@ -256,7 +294,7 @@ async def run_events(run_id: str, request: Request):
 @router.post("/v1/runs/{run_id}/stop")
 async def stop_run(run_id: str, request: Request):
     token = _device_token(request)
-    if not _is_connected(token):
+    if not await _is_connected(token):
         _offline_response()
     return await _proxy(token, "POST", f"/v1/runs/{run_id}/stop", None, _caller_headers(request))
 
@@ -264,7 +302,7 @@ async def stop_run(run_id: str, request: Request):
 @router.post("/v1/runs/{run_id}/approval")
 async def approve_run(run_id: str, request: Request):
     token = _device_token(request)
-    if not _is_connected(token):
+    if not await _is_connected(token):
         _offline_response()
     body = await request.json()
     return await _proxy(
@@ -295,7 +333,7 @@ async def approve_run(run_id: str, request: Request):
     methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
 )
 async def device_scoped(device_token: str, full_path: str, request: Request):
-    if not _is_connected(device_token):
+    if not await _is_connected(device_token):
         _offline_response()
 
     body = None
@@ -344,7 +382,7 @@ async def device_scoped(device_token: str, full_path: str, request: Request):
 )
 async def passthrough(full_path: str, request: Request):
     token = _device_token(request)
-    if not _is_connected(token):
+    if not await _is_connected(token):
         _offline_response()
 
     body = None
