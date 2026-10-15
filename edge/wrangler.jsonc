@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "herald-edge",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+  "durable_objects": {
+    "bindings": [{ "name": "DEVICE", "class_name": "Device" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Device"] }],
+  "observability": { "enabled": true }
+}
