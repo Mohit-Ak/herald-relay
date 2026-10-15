@@ -394,11 +394,15 @@ async def dispatch_task(device_token: str, task: A2ATask) -> None:
     status='queued' so the plugin can replay it on the next /tunnel/events
     connection via Last-Event-ID.
     """
+    from services import edge_client  # noqa: PLC0415
+
     if device_token in _plugin_queues:
         await _plugin_queues[device_token].put(
             {"type": "task", "task": task.model_dump()}
         )
         logger.info(f"[dispatch_task] task {task.task_id} enqueued for {device_token[:8]}...")
+    elif await edge_client.deliver(device_token, {"type": "task", "task": task.model_dump()}):
+        logger.info(f"[dispatch_task] task {task.task_id} delivered via edge to {device_token[:8]}...")
     else:
         db = get_db()
         db.collection("tasks").document(task.task_id).set(
@@ -811,12 +815,16 @@ async def tunnel_approval(req: ApprovalRequest):
         "timestamp": time.time(),
     }
 
+    from services import edge_client  # noqa: PLC0415
+
     q = _plugin_queues.get(req.device_token)
     if q:
         await q.put(json.dumps({"event": "approval", "data": approval_payload}))
         logger.info(
             f"[approval] device={req.device_token[:8]}... run={req.run_id} approved={req.approved}"
         )
+    elif await edge_client.deliver(req.device_token, {"type": "approval", "data": approval_payload}):
+        logger.info(f"[approval] delivered via edge: run={req.run_id} approved={req.approved}")
     else:
         # Plugin offline — persist in Firestore so it picks up on reconnect
         db = get_db()

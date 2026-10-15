@@ -57,18 +57,21 @@ async def main():
         print(f"holding {HOLD}s idle...", flush=True)
         await asyncio.sleep(HOLD)
         # 30 random devices become active
-        lat, bad = [], 0
+        lat, bad, fails = [], 0, []
         async def hit(tok):
             nonlocal bad
             t = time.time()
             async with http.get(f"{EDGE}/d/{tok}/health") as r:
-                await r.read()
+                body = (await r.read())[:80]
                 if r.status != 200:
                     bad += 1
+                    fails.append((r.status, body))
             lat.append((time.time() - t) * 1000)
         await asyncio.gather(*[hit(t) for t in random.sample(ready, min(30, len(ready)))])
         lat.sort()
         print(f"active after idle: {len(lat)-bad}/{len(lat)} ok, p50={lat[len(lat)//2]:.0f}ms p95={lat[int(len(lat)*.95)-1]:.0f}ms")
+        from collections import Counter
+        print("failures:", Counter(fails).most_common(5))
         print(f"pongs received while idle: {stats['pongs']}; still connected: {sum(not t.done() for t in tasks)}")
         stop.set()
         for t in tasks:

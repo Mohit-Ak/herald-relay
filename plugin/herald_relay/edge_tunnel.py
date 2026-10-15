@@ -43,7 +43,8 @@ class EdgeTunnel:
         self.device_token = device_token
         self.hermes_url = hermes_url.rstrip("/")
         self.hermes_key = hermes_key
-        self.on_event = None  # optional async callback(dict) for server pushes
+        self.on_event = None    # optional async callback(dict) for server pushes
+        self.on_connect = None  # optional async callback() after each (re)connect
         self._inflight: dict[str, asyncio.Task] = {}
         self._stop = asyncio.Event()
         self.connected = asyncio.Event()
@@ -87,6 +88,8 @@ class EdgeTunnel:
             logger.info("edge tunnel connected: %s", self.edge_url)
             self.connected.set()
             self._ws = ws
+            if self.on_connect:
+                asyncio.create_task(self.on_connect())
             try:
                 async for msg in ws:
                     if msg.type == aiohttp.WSMsgType.TEXT:
