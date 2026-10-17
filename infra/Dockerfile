@@ -15,6 +15,10 @@ WORKDIR /app/backend
 COPY --from=builder /install /usr/local
 COPY backend/ .
 
+# Cloud Run mounts the env file (Secret Manager: herald-relay-env) at
+# /secrets/env; main.py's load_dotenv() reads ./.env.
+RUN rm -f .env && ln -sf /secrets/env /app/backend/.env
+
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8082
 
