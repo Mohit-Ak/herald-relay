@@ -9,6 +9,15 @@ on:
       - 'infra/Dockerfile'
       - '.dockerignore'
       - '.github/workflows/relay-deploy.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - 'plugin/**'
+      - 'tests/**'
+      - 'infra/Dockerfile'
+      - '.github/workflows/relay-deploy.yml'
 
 concurrency:
   group: relay-deploy
@@ -27,7 +36,31 @@ env:
   SERVICE: herald
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tests/test_rollover_e2e.py runs the pre-fix relay from history
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'  # matches infra/Dockerfile
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt pytest pytest-asyncio respx -e plugin
+      - name: Relay unit tests
+        run: cd backend && python -m pytest -q
+      - name: Plugin unit tests
+        run: cd plugin && python -m pytest -q
+      - name: End-to-end (incl. deploy rollover)
+        run: python -m pytest -q tests
+
   deploy:
+    needs: test
+    # The pull_request trigger above must never deploy unmerged code.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
