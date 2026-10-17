@@ -26,6 +26,35 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _close_tunnels_on_sigterm() -> None:
+    """Chain a SIGTERM hook that ends every plugin SSE stream immediately.
+
+    Uvicorn's graceful shutdown waits for open connections to finish, and a
+    tunnel stream never finishes on its own — so without this a terminating
+    relay keeps every plugin pinned to a process that is going away. Closing
+    the streams makes each plugin reconnect at once, landing on the instance
+    that replaces this one. Uvicorn installs its own handler before lifespan
+    startup runs, so we wrap it rather than replace it.
+    """
+    import asyncio
+    import signal
+
+    from routers import tunnel as _tunnel
+
+    loop = asyncio.get_running_loop()
+    prev = signal.getsignal(signal.SIGTERM)
+
+    def _handler(signum, frame):
+        loop.call_soon_threadsafe(_tunnel.close_all_streams)
+        if callable(prev):
+            prev(signum, frame)
+
+    try:
+        signal.signal(signal.SIGTERM, _handler)
+    except ValueError:  # not the main thread (e.g. some test runners)
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Herald Relay starting up …")
@@ -34,6 +63,7 @@ async def lifespan(app: FastAPI):
         logger.info("Firestore connected")
     except Exception as e:
         logger.warning(f"Firestore not available (will retry on first request): {e}")
+    _close_tunnels_on_sigterm()
     yield
     logger.info("Herald Relay shutting down …")
 
@@ -91,4 +121,6 @@ async def health():
         + _tunnel.plugin_connected_count(),
         "ws_devices": relay_manager.connected_count(),
         "sse_devices": _tunnel.plugin_connected_count(),
+        "revision": _tunnel.revision(),
+        "instance": _tunnel.INSTANCE_ID,
     }

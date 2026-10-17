@@ -64,6 +64,82 @@ _stream_waiters: dict[str, asyncio.Queue] = {}
 # How long the proxy waits for the plugin to answer a forwarded request.
 HTTP_FORWARD_TIMEOUT_S = 30.0
 
+# ---------------------------------------------------------------------------
+# Rollover safety
+#
+# The tunnel registry above is in-process memory. On Cloud Run every deploy
+# (backend OR relay — they share one service) starts a NEW instance with an
+# empty registry, while the plugin's long-lived GET /tunnel/events stays
+# pinned to the OLD, draining instance: Cloud Run lets in-flight requests run
+# to the request timeout (3600 s) and the old instance keeps heartbeating, so
+# the client sees a perfectly healthy stream. Every phone request then lands
+# on the new instance, finds no tunnel and answers 503 device_offline — for up
+# to an hour after each deploy (observed 2026-10-17, herald-00004).
+#
+# Three independent defences:
+#   1. Every stream is stamped with the revision + instance that holds it
+#      (headers + a first ``hello`` event), and GET /tunnel/status reports the
+#      revision/instance that a FRESH request reaches. A plugin that sees the
+#      two diverge knows its stream is stranded and reconnects within seconds.
+#   2. Streams are recycled after TUNNEL_MAX_STREAM_S, so even an old plugin
+#      build without (1) is stranded for minutes, not an hour.
+#   3. On SIGTERM every stream is closed immediately (see close_all_streams),
+#      for runtimes that do signal a draining process.
+# ---------------------------------------------------------------------------
+INSTANCE_ID = uuid.uuid4().hex[:12]
+TUNNEL_MAX_STREAM_S = float(os.getenv("HERALD_TUNNEL_MAX_STREAM_S", "300"))
+# After the SERVER recycles a stream, keep the device's queue registered this
+# long so a phone request arriving in the ~0.5 s reconnect gap is queued and
+# delivered on the new stream instead of answering 503.
+TUNNEL_RECYCLE_GRACE_S = float(os.getenv("HERALD_TUNNEL_RECYCLE_GRACE_S", "15"))
+_CLOSE_STREAM = {"type": "__close__"}  # queue sentinel; never sent on the wire
+# Queues whose stream was recycled by us and that are awaiting a reconnect.
+_orphaned: set[int] = set()
+# device_token → number of forwards in flight. A stream is never recycled
+# while this is non-zero: plugin builds before this change tear down their
+# HTTP client when the stream ends, which would cut a long run mid-answer.
+_inflight: dict[str, int] = {}
+
+
+def _inflight_add(token: str, delta: int) -> None:
+    n = _inflight.get(token, 0) + delta
+    if n > 0:
+        _inflight[token] = n
+    else:
+        _inflight.pop(token, None)
+
+
+def revision() -> str:
+    """Cloud Run revision serving this process (``local`` off Cloud Run)."""
+    return os.getenv("K_REVISION", "") or "local"
+
+
+def _drop_orphan(token: str, queue: asyncio.Queue) -> None:
+    """Grace expired with no reconnect: the device really is gone."""
+    if id(queue) in _orphaned:
+        _orphaned.discard(id(queue))
+        if _plugin_queues.get(token) is queue:
+            del _plugin_queues[token]
+            logger.info(f"[tunnel/events] plugin disconnected: {token[:8]}... (no reconnect)")
+
+
+def close_all_streams() -> int:
+    """End every plugin SSE stream so the plugins reconnect elsewhere.
+
+    Safe to call from any thread / a signal handler's call_soon_threadsafe.
+    Returns the number of streams told to close.
+    """
+    n = 0
+    for q in list(_plugin_queues.values()):
+        try:
+            q.put_nowait(_CLOSE_STREAM)
+            n += 1
+        except Exception:  # noqa: BLE001
+            pass
+    if n:
+        logger.info(f"[tunnel] closing {n} plugin stream(s) for shutdown")
+    return n
+
 
 def is_plugin_connected(device_token: str) -> bool:
     """True when the plugin holds a live GET /tunnel/events SSE stream."""
@@ -96,6 +172,7 @@ async def forward_http(
     loop = asyncio.get_running_loop()
     fut: asyncio.Future = loop.create_future()
     _http_waiters[request_id] = fut
+    _inflight_add(device_token, 1)
     try:
         await queue.put(
             {
@@ -110,6 +187,7 @@ async def forward_http(
         return await asyncio.wait_for(fut, timeout=timeout)
     finally:
         _http_waiters.pop(request_id, None)
+        _inflight_add(device_token, -1)
 
 
 class HttpResponseRequest(BaseModel):
@@ -160,6 +238,7 @@ async def open_stream(
     loop = asyncio.get_running_loop()
     fut: asyncio.Future = loop.create_future()
     _http_waiters[request_id] = fut
+    _inflight_add(device_token, 1)
 
     try:
         await queue.put(
@@ -202,6 +281,7 @@ async def open_stream(
     finally:
         _http_waiters.pop(request_id, None)
         _stream_waiters.pop(request_id, None)
+        _inflight_add(device_token, -1)
 
 
 
@@ -365,19 +445,53 @@ async def _send_fcm(
         logger.error(f"[FCM] send failed for {device_token[:8]}...: {exc}")
 
 
-async def _event_generator(queue: asyncio.Queue, heartbeat_interval: int = 25):
+async def _event_generator(
+    queue: asyncio.Queue,
+    heartbeat_interval: float = 25,
+    max_lifetime: float | None = None,
+    busy=None,
+):
     """
     Async generator that yields SSE-formatted strings from *queue*.
-    Sends a keep-alive heartbeat comment every *heartbeat_interval* seconds.
-    Exits cleanly on cancellation.
+    Sends a keep-alive heartbeat comment every *heartbeat_interval* seconds —
+    the plugin treats ~60 s of silence as a dead connection and reconnects.
+
+    With *max_lifetime*, the stream ends once it is that old AND nothing is
+    queued (so a pending forward is never dropped), which makes the client
+    reconnect and land on whichever instance is serving now; ``busy()``
+    returning True defers that (forwards in flight). Ends at once on
+    the ``_CLOSE_STREAM`` sentinel. Exits cleanly on cancellation.
     """
+    started = time.monotonic()
+    queue._herald_recycled = False  # type: ignore[attr-defined]
+
+    def _expired() -> bool:
+        return (
+            max_lifetime is not None
+            and time.monotonic() - started >= max_lifetime
+            and queue.empty()
+            and not (busy and busy())
+        )
+
     while True:
+        wait = heartbeat_interval
+        if max_lifetime is not None:
+            remaining = max_lifetime - (time.monotonic() - started)
+            wait = max(0.0, min(wait, remaining)) if remaining > 0 else wait
         try:
-            data = await asyncio.wait_for(queue.get(), timeout=heartbeat_interval)
+            data = await asyncio.wait_for(queue.get(), timeout=wait)
+            if data is _CLOSE_STREAM:
+                return
             yield f"data: {json.dumps(data)}\n\n"
         except asyncio.TimeoutError:
+            if _expired():
+                queue._herald_recycled = True  # type: ignore[attr-defined]
+                return
             yield ": heartbeat\n\n"
         except asyncio.CancelledError:
+            return
+        if _expired():
+            queue._herald_recycled = True  # type: ignore[attr-defined]
             return
 
 
@@ -474,7 +588,12 @@ async def tunnel_events(
 
     _require_device(token)
 
-    queue: asyncio.Queue = asyncio.Queue()
+    # Re-attach to a queue we recycled moments ago, so anything a phone sent
+    # during the reconnect gap is delivered rather than lost.
+    queue = _plugin_queues.get(token)
+    if queue is None or id(queue) not in _orphaned:
+        queue = asyncio.Queue()
+    _orphaned.discard(id(queue))
     _plugin_queues[token] = queue
     logger.info(f"[tunnel/events] plugin connected: {token[:8]}...")
 
@@ -497,20 +616,58 @@ async def tunnel_events(
         except Exception as exc:
             logger.warning(f"[tunnel/events] Last-Event-ID replay failed: {exc}")
 
+    rev = revision()
+
     async def _generator():
         try:
-            async for chunk in _event_generator(queue):
+            # First frame names who holds this stream, so the plugin can tell
+            # when fresh requests are being served by someone else (a newer
+            # revision) and move over. Older plugins ignore unknown types.
+            hello = {"type": "hello", "revision": rev, "instance": INSTANCE_ID}
+            yield f"data: {json.dumps(hello)}\n\n"
+            async for chunk in _event_generator(
+                queue,
+                max_lifetime=TUNNEL_MAX_STREAM_S or None,
+                busy=lambda: _inflight.get(token, 0) > 0,
+            ):
                 yield chunk
         finally:
-            if _plugin_queues.get(token) is queue:
-                del _plugin_queues[token]
-            logger.info(f"[tunnel/events] plugin disconnected: {token[:8]}...")
+            recycled = getattr(queue, "_herald_recycled", False)
+            if recycled and TUNNEL_RECYCLE_GRACE_S > 0 and _plugin_queues.get(token) is queue:
+                _orphaned.add(id(queue))
+                asyncio.get_running_loop().call_later(
+                    TUNNEL_RECYCLE_GRACE_S, _drop_orphan, token, queue
+                )
+                logger.info(f"[tunnel/events] recycled stream: {token[:8]}...")
+            else:
+                if _plugin_queues.get(token) is queue:
+                    del _plugin_queues[token]
+                logger.info(f"[tunnel/events] plugin disconnected: {token[:8]}...")
 
     return StreamingResponse(
         _generator(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Herald-Revision": rev,
+            "X-Herald-Instance": INSTANCE_ID,
+        },
     )
+
+
+@router.get("/status", summary="Which revision/instance a fresh request reaches")
+async def tunnel_status(device_token: Optional[str] = Query(None)):
+    """Cheap probe the plugin polls to detect a stranded stream.
+
+    Deliberately no Firestore read: it is polled every ~20 s per device and
+    reveals nothing beyond what /hermes/health already does.
+    """
+    return {
+        "revision": revision(),
+        "instance": INSTANCE_ID,
+        "connected": bool(device_token) and device_token in _plugin_queues,
+    }
 
 
 # ---------------------------------------------------------------------------

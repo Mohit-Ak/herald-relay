@@ -35,8 +35,27 @@ logger = logging.getLogger(__name__)
 # SSE line pattern
 _SSE_DATA_RE = re.compile(r"^data:\s*(.*)")
 
-# How long to wait for a heartbeat before considering the stream stale
-_HEARTBEAT_TIMEOUT_S = 60.0
+# Server-silence watchdog: the relay sends a ``: heartbeat`` comment every
+# 25 s, so this much silence on /tunnel/events means the connection is dead
+# (half-open TCP, a NAT that dropped the mapping, a frozen proxy). It is
+# enforced as the httpx READ timeout on the stream, which raises and makes
+# run_forever() reconnect.
+_HEARTBEAT_TIMEOUT_S = float(os.environ.get("HERALD_TUNNEL_SILENCE_S", "60"))
+
+# Rollover watchdog. Heartbeats only prove the stream's OWN instance is alive.
+# After a Cloud Run deploy that instance is the old, draining one: it keeps
+# heartbeating for up to the 3600 s request timeout while every phone request
+# goes to the new instance, which has never heard of us and answers 503
+# device_offline. So every _ROLLOVER_PROBE_S we ask the relay which instance a
+# FRESH request reaches (GET /tunnel/status) and reconnect when it is not the
+# one holding our stream. Two consecutive mismatches are required so a lone
+# probe that lands elsewhere (e.g. a brief extra instance) doesn't churn.
+_ROLLOVER_PROBE_S = float(os.environ.get("HERALD_TUNNEL_PROBE_S", "10"))
+_ROLLOVER_MISMATCHES = 2
+
+
+class StreamStranded(Exception):
+    """Our tunnel stream is held by an instance fresh requests no longer reach."""
 
 # How long the run-event stream may produce NOTHING before we declare the run
 # stuck and tell the user. Hermes emits tool/message events continuously during
@@ -91,6 +110,24 @@ class HeraldRelayClient:
         # approval queues: run_id → asyncio.Queue  (for QUESTION/approval flow)
         self._approval_queues: dict[str, asyncio.Queue] = {}
 
+        # Identity of the relay instance holding the current /tunnel/events
+        # stream, from its ``hello`` frame (None on relays that predate it).
+        self._stream_instance: Optional[str] = None
+
+        # Long-lived client for everything that is NOT the tunnel stream:
+        # registration, forwarded requests and their replies, run updates.
+        # It must outlive a stream reconnect — otherwise every reconnect
+        # (now routine: rollovers, periodic recycling) would close the client
+        # under in-flight forwards and cut off a phone mid-run.
+        self._http: Optional[httpx.AsyncClient] = None
+
+    def _client(self) -> httpx.AsyncClient:
+        if self._http is None or self._http.is_closed:
+            self._http = httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=5.0),
+            )
+        return self._http
+
     def _hermes_headers(self, forwarded: dict | None = None) -> dict:
         """Auth headers for calls into the LOCAL Hermes api_server.
 
@@ -133,6 +170,11 @@ class HeraldRelayClient:
                 await self._connect_and_stream()
                 backoff = 1.0  # reset on clean exit
                 failures = 0
+            except StreamStranded as exc:
+                # Not a failure: the relay rolled over. Reconnect immediately.
+                logger.info("Relay rolled over (%s) — reconnecting tunnel now", exc)
+                backoff = 1.0
+                failures = 0
             except asyncio.CancelledError:
                 logger.info("HeraldRelayClient: cancelled")
                 break
@@ -158,28 +200,105 @@ class HeraldRelayClient:
         for task in self._run_tasks.values():
             task.cancel()
         self._run_tasks.clear()
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
 
     # ------------------------------------------------------------------
     # Core tunnel
     # ------------------------------------------------------------------
 
     async def _connect_and_stream(self) -> None:
-        """Single tunnel session: POST /connect, then GET /events."""
+        """Single tunnel session: POST /connect, then GET /events.
+
+        Ends (so run_forever reconnects) when the stream closes, when the
+        server goes silent for _HEARTBEAT_TIMEOUT_S (httpx ReadTimeout), or
+        with StreamStranded when the rollover watchdog sees fresh requests
+        reaching a different relay instance.
+        """
+        client = self._client()
+        # 1. Register with Cloud
+        await self._register(client)
+
+        # 2. Flush any offline-queued approvals from Firestore
+        await self._flush_pending_approvals(client)
+
+        # 3. Stream A2A tasks
+        self._stream_instance = None
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=_HEARTBEAT_TIMEOUT_S, write=10.0, pool=5.0),
-        ) as client:
-            # 1. Register with Cloud
-            await self._register(client)
-
-            # 2. Flush any offline-queued approvals from Firestore
-            await self._flush_pending_approvals(client)
-
-            # 3. Stream A2A tasks
+        ) as stream_client:
             logger.info("Subscribed to tunnel events at %s/tunnel/events", self.relay_url)
-            async for task_payload in self._event_stream(client):
-                if not self._running:
-                    break
-                await self._handle_payload(client, task_payload)
+
+            async def consume() -> None:
+                async for task_payload in self._event_stream(stream_client):
+                    if not self._running:
+                        break
+                    await self._handle_payload(client, task_payload)
+
+            consumer = asyncio.create_task(consume())
+            watchdog = asyncio.create_task(self._rollover_watchdog(client))
+            try:
+                done, _ = await asyncio.wait(
+                    {consumer, watchdog}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if consumer not in done:
+                    # Only StreamStranded may end a healthy stream; a watchdog
+                    # that merely stops (or crashes) must not churn the tunnel.
+                    exc = watchdog.exception()
+                    if isinstance(exc, StreamStranded):
+                        raise exc
+                    if exc is not None:
+                        logger.warning("rollover watchdog stopped: %r", exc)
+                    await consumer
+                consumer.result()  # re-raise stream errors
+            finally:
+                for t in (consumer, watchdog):
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(consumer, watchdog, return_exceptions=True)
+
+    async def _rollover_watchdog(self, client: httpx.AsyncClient) -> None:
+        """Raise StreamStranded once fresh requests reach a different instance.
+
+        Never fires against a relay without /tunnel/status, so old servers
+        behave as before. A stream that never sent ``hello``
+        while /tunnel/status DOES answer is held by an older relay build than
+        the one fresh requests reach — i.e. it is stranded on the pre-deploy
+        instance — and is treated as a mismatch.
+        """
+        url = f"{self.relay_url}/tunnel/status"
+        mismatches = 0
+        while self._running:
+            await asyncio.sleep(_ROLLOVER_PROBE_S)
+            mine = self._stream_instance
+            try:
+                resp = await client.get(
+                    url, params={"device_token": self.device_token}, timeout=10.0
+                )
+            except httpx.HTTPError as exc:
+                logger.debug("rollover probe failed: %s", exc)
+                continue
+            if resp.status_code != 200:
+                # 404 = a relay build without /tunnel/status. Keep probing:
+                # the very next deploy may replace it with one that has it,
+                # and that is exactly the moment our stream gets stranded.
+                continue
+            try:
+                theirs = resp.json().get("instance")
+            except ValueError:
+                continue
+            if not theirs:
+                continue
+            if mine is not None and theirs == mine:
+                mismatches = 0
+                continue
+            mismatches += 1
+            if mismatches >= _ROLLOVER_MISMATCHES:
+                raise StreamStranded(
+                    f"stream on {mine or 'a pre-hello relay'}, "
+                    f"fresh requests reach {theirs}"
+                )
 
     async def _handle_payload(self, client: httpx.AsyncClient, task_payload: dict) -> None:
         """One server-pushed message (task / approval / forward_request).
@@ -442,9 +561,18 @@ class HeraldRelayClient:
                     if raw == "[DONE]":
                         return
                     try:
-                        yield json.loads(raw)
+                        payload = json.loads(raw)
                     except json.JSONDecodeError:
                         logger.debug("Non-JSON SSE data: %r", raw[:100])
+                        continue
+                    if isinstance(payload, dict) and payload.get("type") == "hello":
+                        self._stream_instance = payload.get("instance") or None
+                        logger.info(
+                            "Tunnel stream held by revision=%s instance=%s",
+                            payload.get("revision"), self._stream_instance,
+                        )
+                        continue
+                    yield payload
 
     # ------------------------------------------------------------------
     # Hermes run execution + event forwarding
