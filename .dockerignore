@@ -1,0 +1,12 @@
+**/__pycache__
+**/*.pyc
+**/.env
+**/.venv
+**/venv
+.git
+e2e_venv
+edge
+website
+plugin
+tests
+*.log

@@ -6,30 +6,30 @@ on:
       - main
     paths:
       - 'backend/**'
+      - 'infra/Dockerfile'
+      - '.dockerignore'
       - '.github/workflows/relay-deploy.yml'
 
-# Serialize deploys: rapid pushes to main should never race two `tar xzf`
-# extracts on top of /opt/herald-relay. cancel-in-progress is false because
-# we'd rather queue the second deploy than abandon one mid-extract.
 concurrency:
   group: relay-deploy
   cancel-in-progress: false
 
+# The relay runs as the "relay" sidecar container of Cloud Run service
+# "herald" (project eh-voice-ai, us-central1), next to the Herald backend and
+# an nginx ingress, on one always-on instance. Its env comes from Secret
+# Manager (herald-relay-env) mounted at /secrets/env.
+#
+# This job builds the relay image and swaps ONLY the relay container's image in
+# the live service spec; the backend and ingress keep the images they serve.
 env:
   PROJECT: eh-voice-ai
-  # Production VM `herald-api` (replaced the pre-pivot box in Oct 2026; same
-  # static IP and hostname herald-api.eventhorizonlabs.xyz). On the box: unit
-  # herald-relay, env /etc/herald-relay.env, code /opt/herald-relay.
-  # Verify with: gcloud compute instances list --project=eh-voice-ai
-  VM_NAME: herald-api
-  VM_ZONE: us-central1-a
+  REGION: us-central1
+  SERVICE: herald
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -41,41 +41,35 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      # The relay runs as a plain systemd unit (herald-relay) out of
-      # /opt/herald-relay with its own venv — NOT as a Docker container. It
-      # shares port 8082 on the box, so a container deploy would collide with
-      # the running unit. Mirror the proven herald backend-deploy pattern:
-      # rsync the source, install new deps, restart the unit, poll /health.
-      #
-      # `gcloud compute ssh` provisions its own SSH key on the fly, so no
-      # GCE_SSH_KEY secret is needed.
-      - name: Push code + restart service
+      - name: Build relay image
         run: |
-          tar czf /tmp/relay.tgz --exclude=venv --exclude=.venv \
-            --exclude=__pycache__ --exclude=.pytest_cache --exclude=tests \
-            --exclude=conftest.py .
-          gcloud compute scp --zone="${VM_ZONE}" --project="${PROJECT}" \
-            /tmp/relay.tgz "${VM_NAME}:/tmp/relay.tgz"
-          gcloud compute ssh "${VM_NAME}" --zone="${VM_ZONE}" --project="${PROJECT}" \
-            --command="set -e
-              cd /opt/herald-relay
-              tar xzf /tmp/relay.tgz
-              .venv/bin/pip install -q -r requirements.txt
-              sudo systemctl restart herald-relay
-              # Poll /health up to 30s — uvicorn binds within ~5s typically.
-              # Bail out the moment we get a 200, else fail loudly with logs.
-              for i in \$(seq 1 30); do
-                if curl -fsS http://localhost:8082/health >/dev/null 2>&1; then
-                  echo \"✓ /health responded after \${i}s\"
-                  curl -fsS http://localhost:8082/health
-                  echo
-                  echo '✓ deploy complete'
-                  exit 0
-                fi
-                sleep 1
-              done
-              echo '✗ /health never responded after 30s — last attempt:'
-              curl -v http://localhost:8082/health || true
-              sudo systemctl status herald-relay --no-pager || true
-              sudo journalctl -u herald-relay --since '1 minute ago' --no-pager | tail -50
-              exit 1"
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/herald/relay:${GITHUB_SHA:0:7}"
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+          cp infra/Dockerfile Dockerfile
+          gcloud builds submit . --project "$PROJECT" --region "$REGION" --tag "$IMAGE" --quiet
+
+      - name: Roll out new revision (relay container only)
+        run: |
+          gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" \
+            --format=export > svc.yaml
+          python3 - <<'EOF'
+          import os, yaml
+          d = yaml.safe_load(open("svc.yaml"))
+          spec = d["spec"]["template"]
+          spec["metadata"].pop("name", None)  # let Cloud Run name the revision
+          hit = [c for c in spec["spec"]["containers"] if c["name"] == "relay"]
+          assert hit, "no relay container in service herald"
+          hit[0]["image"] = os.environ["IMAGE"]
+          yaml.safe_dump(d, open("svc.yaml", "w"), sort_keys=False)
+          EOF
+          gcloud run services replace svc.yaml --project "$PROJECT" --region "$REGION" --quiet
+
+      - name: Verify relay answers through the public hostname
+        run: |
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' https://herald-api.eventhorizonlabs.xyz/push/register)
+            # GET on a POST-only route: 405 means the relay itself answered.
+            [ "$code" = 405 ] && { echo "✓ relay answering"; exit 0; }
+            sleep 5
+          done
+          echo "✗ relay route /push/register returned $code (want 405)"; exit 1
