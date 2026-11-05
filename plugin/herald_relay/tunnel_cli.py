@@ -6,6 +6,7 @@ This is the ONE command a self-hoster runs on any Linux box::
     herald-tunnel setup            # register device, write config, install service
     herald-tunnel run              # or run in the foreground without systemd
     herald-tunnel status           # is the tunnel up, end to end?
+    herald-tunnel ensure           # start it in the background if it is down
 
 ``setup`` is idempotent: re-running it keeps the existing device token unless
 ``--new-token`` is passed, so a reinstall never silently orphans the token that
@@ -55,6 +56,90 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 """
+
+
+KEEPALIVE_NAME = "herald-tunnel-keepalive"
+KEEPALIVE_SCRIPT = "herald_tunnel_keepalive.sh"
+
+
+# ── keeping the tunnel up without systemd ─────────────────────────────────────
+
+def _lock_path() -> Path:
+    return HERMES_HOME / "herald" / "tunnel.lock"
+
+
+def _try_lock():
+    """Hold the single-tunnel lock for this process's life, or None if another
+    tunnel already holds it."""
+    import fcntl
+    path = _lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "a+")  # noqa: SIM115 - held until exit
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    return f
+
+
+def _tunnel_running() -> bool:
+    f = _try_lock()
+    if f is None:
+        return True
+    f.close()
+    return False
+
+
+def _spawn_detached_run() -> None:
+    log = HERMES_HOME / "herald" / "tunnel.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "ab") as out:
+        subprocess.Popen(_self_exec().split() + ["run"], stdin=subprocess.DEVNULL,
+                         stdout=out, stderr=out, start_new_session=True)
+
+
+def _has_user_systemd() -> bool:
+    try:
+        return subprocess.run(["systemctl", "--user", "show-environment"],
+                              capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _hermes_cron(argv: list[str]) -> tuple[int, str]:
+    import shutil
+    hermes = shutil.which("hermes")
+    if not hermes:
+        return 127, "hermes not found"
+    try:
+        p = subprocess.run([hermes, "cron", *argv], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, str(e)
+    return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+
+def _install_keepalive() -> bool:
+    """Without systemd nothing restarts the tunnel after a reboot. Hermes is
+    already kept alive on these machines, so its scheduler re-checks the
+    tunnel every few minutes (no LLM, silent unless it fails)."""
+    scripts = HERMES_HOME / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    script = scripts / KEEPALIVE_SCRIPT
+    script.write_text("#!/bin/sh\n# Herald: restart the relay tunnel if it is not running.\n"
+                      f"exec {_self_exec()} ensure\n")
+    script.chmod(0o755)
+    code, out = _hermes_cron(["list", "--all"])
+    if code == 0 and KEEPALIVE_NAME in out:
+        return True
+    code, out = _hermes_cron(["create", "every 5m", "--name", KEEPALIVE_NAME,
+                              "--script", str(script), "--no-agent", "--deliver", "local"])
+    if code != 0:
+        print(f"WARNING: could not add the keepalive ({out.strip()[-200:]}). "
+              "Start the tunnel again after a restart with: herald-tunnel run",
+              file=sys.stderr)
+        return False
+    return True
 
 
 # ── config plumbing ──────────────────────────────────────────────────────────
@@ -142,6 +227,17 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print("\nRun the tunnel with: herald-tunnel run")
         return 0
 
+    if not _has_user_systemd():
+        # Containers and many hosted agents: no systemd. Start now, and let
+        # Hermes' scheduler bring the tunnel back after restarts.
+        if not _tunnel_running():
+            _spawn_detached_run()
+        kept = _install_keepalive()
+        print("tunnel started" + (" (kept running by a Hermes scheduled check every 5 minutes)"
+                                  if kept else ""))
+        print("\nVerify end-to-end with: herald-tunnel status")
+        return 0
+
     exec_start = _self_exec() + " run"
     unit_dir = Path.home() / ".config/systemd/user"
     unit_dir.mkdir(parents=True, exist_ok=True)
@@ -180,6 +276,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                      "%s/config.yaml)", HERMES_HOME)
         return 1
 
+    lock = _try_lock()
+    if lock is None:
+        logger.info("a tunnel is already running for this machine; not starting another")
+        return 0
+
     logger.info("starting tunnel relay=%s local_hermes=%s api_key=%s",
                 relay_url, local_hermes, "set" if key else "MISSING")
     client = HeraldRelayClient(
@@ -192,6 +293,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         asyncio.run(client.run_forever())
     except KeyboardInterrupt:
         pass
+    return 0
+
+
+def cmd_ensure(args: argparse.Namespace) -> int:
+    """Start the tunnel in the background if it is not running. Silent."""
+    if not _tunnel_running():
+        _spawn_detached_run()
     return 0
 
 
@@ -256,6 +364,9 @@ def main() -> int:
 
     p_run = sub.add_parser("run", help="run the tunnel in the foreground")
     p_run.set_defaults(func=cmd_run)
+
+    p_ensure = sub.add_parser("ensure", help="start the tunnel in the background if it is not running")
+    p_ensure.set_defaults(func=cmd_ensure)
 
     p_status = sub.add_parser("status", help="check local Hermes, relay, and tunnel")
     p_status.set_defaults(func=cmd_status)
