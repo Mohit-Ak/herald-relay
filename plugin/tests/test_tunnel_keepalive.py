@@ -103,7 +103,7 @@ def test_setup_without_systemd_adds_a_keepalive_and_starts_now(home, monkeypatch
     create = [a for a in crons if a[:1] == ["create"]]
     assert len(create) == 1
     a = create[0]
-    assert "--no-agent" in a and "--script" in a and a[a.index("--script") + 1] == str(script)
+    assert "--no-agent" in a and "--script" in a and a[a.index("--script") + 1] == tunnel_cli.KEEPALIVE_SCRIPT  # Hermes wants the bare name
     assert a[a.index("--name") + 1] == tunnel_cli.KEEPALIVE_NAME
     assert not (Path.home() / ".config/systemd/user" / "never").exists()
 

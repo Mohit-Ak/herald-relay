@@ -133,7 +133,7 @@ def _install_keepalive() -> bool:
     if code == 0 and KEEPALIVE_NAME in out:
         return True
     code, out = _hermes_cron(["create", "every 5m", "--name", KEEPALIVE_NAME,
-                              "--script", str(script), "--no-agent", "--deliver", "local"])
+                              "--script", KEEPALIVE_SCRIPT, "--no-agent", "--deliver", "local"])
     if code != 0:
         print(f"WARNING: could not add the keepalive ({out.strip()[-200:]}). "
               "Start the tunnel again after a restart with: herald-tunnel run",
