@@ -132,7 +132,7 @@ def _install_keepalive() -> bool:
     code, out = _hermes_cron(["list", "--all"])
     if code == 0 and KEEPALIVE_NAME in out:
         return True
-    code, out = _hermes_cron(["create", "every 5m", "--name", KEEPALIVE_NAME,
+    code, out = _hermes_cron(["create", "every 1m", "--name", KEEPALIVE_NAME,
                               "--script", KEEPALIVE_SCRIPT, "--no-agent", "--deliver", "local"])
     if code != 0:
         print(f"WARNING: could not add the keepalive ({out.strip()[-200:]}). "
@@ -233,7 +233,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         if not _tunnel_running():
             _spawn_detached_run()
         kept = _install_keepalive()
-        print("tunnel started" + (" (kept running by a Hermes scheduled check every 5 minutes)"
+        print("tunnel started" + (" (kept running by a Hermes scheduled check every minute)"
                                   if kept else ""))
         print("\nVerify end-to-end with: herald-tunnel status")
         return 0
