@@ -202,12 +202,18 @@ def cmd_status(args: argparse.Namespace) -> int:
     token = cfg.get("device_token", "")
     ok = True
 
-    def check(label: str, url: str) -> bool:
+    def check(label: str, url: str, down: str = "") -> bool:
         try:
             with urllib.request.urlopen(url, timeout=8) as r:
                 body = r.read().decode(errors="replace")[:120]
             print(f"  OK    {label}: {body}")
             return True
+        except urllib.error.HTTPError as e:
+            if down and e.code == 503:
+                print(f"  FAIL  {label}: {down}")
+            else:
+                print(f"  FAIL  {label}: HTTP {e.code}")
+            return False
         except Exception as e:  # noqa: BLE001
             print(f"  FAIL  {label}: {type(e).__name__}: {e}")
             return False
@@ -216,9 +222,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     ok &= check("local Hermes", local + "/health")
     ok &= check("relay", relay_url + "/health")
     if token:
-        # THE test: does the relay see THIS device's tunnel as connected?
+        # THE test: can a phone reach THIS device's Hermes through the relay?
+        # Same address the app uses. (The old /hermes/health?device_token=
+        # form answers 400 on Herald's backend, so a working tunnel read FAIL.)
         ok &= check("tunnel (this device)",
-                    f"{relay_url}/hermes/health?device_token={token}")
+                    f"{relay_url}/hermes/d/{token}/health",
+                    down="not connected. Is `herald-tunnel run` (or its systemd unit) running?")
         print(f"  device-scoped base for remote callers:\n"
               f"    {relay_url}/hermes/d/{token}")
     else:
