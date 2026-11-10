@@ -161,6 +161,14 @@ export class Device extends DurableObject {
     const alias = request.headers.get("x-hermes-key");
     if (alias && !headers.authorization) headers.authorization = `Bearer ${alias}`;
 
+    // The device adds its own key to a request that carries none, so a keyless
+    // request must never reach it: the address alone would be enough to use
+    // the agent. Same rule as the relay (backend/routers/hermes_proxy.py).
+    // Liveness (/health) stays open; it carries no agent data.
+    const sentKey = (headers.authorization || "").replace(/^Bearer/i, "").trim();
+    if (!sentKey && path.split("?")[0] !== "/health")
+      return json({ error: "agent_key_required" }, 401);
+
     let body = null;
     if (!["GET", "HEAD"].includes(request.method)) {
       const text = await request.text();

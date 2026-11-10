@@ -18,6 +18,7 @@ from services import edge_client
 from routers import tunnel as tunnel_mod
 import asyncio
 import json
+import os
 import logging
 from typing import NoReturn
 
@@ -67,6 +68,44 @@ def _caller_headers(request: Request) -> dict:
             out["Authorization"] = value
     return out
 
+
+def _require_key() -> bool:
+    return os.getenv("HERALD_REQUIRE_AGENT_KEY", "1") != "0"
+
+
+def _has_key(headers: dict) -> bool:
+    value = (headers.get("Authorization") or "").strip()
+    if value.lower().startswith("bearer"):
+        value = value[6:].strip()
+    return bool(value)
+
+
+def _keyed_headers(request: Request) -> dict:
+    """The caller's auth headers, or 401 when it sent no agent key.
+
+    WHY: the tunnel client on the agent's machine adds that machine's own key
+    to a forwarded request that carries none. So a keyless request used to be
+    answered as if it were authenticated, and the relay address alone
+    (``/hermes/d/<device_token>``) was enough to read sessions and start runs.
+    Refusing here covers every installed machine at once, old plugins included.
+
+    The relay does not judge the key (per-profile keys differ and only the
+    agent knows them); it only requires that one is sent. Call this AFTER the
+    offline check so a sleeping machine still reads as ``device_offline``.
+    """
+    headers = _caller_headers(request)
+    if _require_key() and not _has_key(headers):
+        # Path only: the device token is in the URL and must not be logged.
+        logger.warning("[auth] refused keyless %s (ua=%s)", request.method,
+                       (request.headers.get("user-agent") or "")[:40])
+        raise HTTPException(
+            401,
+            detail={
+                "error": "agent_key_required",
+                "message": "Send this agent's API key with the request.",
+            },
+        )
+    return headers
 
 
 def _device_token(request: Request) -> str:
@@ -205,7 +244,7 @@ async def get_models(request: Request):
     token = _device_token(request)
     if not await _is_connected(token):
         _offline_response()
-    return await _proxy(token, "GET", "/v1/models", None, _caller_headers(request))
+    return await _proxy(token, "GET", "/v1/models", None, _keyed_headers(request))
 
 
 @router.get("/v1/channels")
@@ -213,7 +252,7 @@ async def get_channels(request: Request):
     token = _device_token(request)
     if not await _is_connected(token):
         _offline_response()
-    return await _proxy(token, "GET", "/v1/channels", None, _caller_headers(request))
+    return await _proxy(token, "GET", "/v1/channels", None, _keyed_headers(request))
 
 
 async def _sse_generator(token: str, method: str, path: str, body, headers: dict):
@@ -275,7 +314,7 @@ async def start_run(request: Request):
         _offline_response()
     body = await request.json()
     return StreamingResponse(
-        _sse_generator(token, "POST", "/v1/runs", body, _caller_headers(request)),
+        _sse_generator(token, "POST", "/v1/runs", body, _keyed_headers(request)),
         media_type="text/event-stream",
     )
 
@@ -286,7 +325,7 @@ async def run_events(run_id: str, request: Request):
     if not await _is_connected(token):
         _offline_response()
     return StreamingResponse(
-        _sse_generator(token, "GET", f"/v1/runs/{run_id}/events", None, _caller_headers(request)),
+        _sse_generator(token, "GET", f"/v1/runs/{run_id}/events", None, _keyed_headers(request)),
         media_type="text/event-stream",
     )
 
@@ -296,7 +335,7 @@ async def stop_run(run_id: str, request: Request):
     token = _device_token(request)
     if not await _is_connected(token):
         _offline_response()
-    return await _proxy(token, "POST", f"/v1/runs/{run_id}/stop", None, _caller_headers(request))
+    return await _proxy(token, "POST", f"/v1/runs/{run_id}/stop", None, _keyed_headers(request))
 
 
 @router.post("/v1/runs/{run_id}/approval")
@@ -306,7 +345,7 @@ async def approve_run(run_id: str, request: Request):
         _offline_response()
     body = await request.json()
     return await _proxy(
-        token, "POST", f"/v1/runs/{run_id}/approval", body, _caller_headers(request)
+        token, "POST", f"/v1/runs/{run_id}/approval", body, _keyed_headers(request)
     )
 
 
@@ -356,7 +395,12 @@ async def device_scoped(device_token: str, full_path: str, request: Request):
     # life of the run and the client renders them incrementally.
     is_sse = full_path.rstrip("/") == "v1/runs" and request.method == "POST"
     is_sse = is_sse or full_path.endswith("/events")
-    headers = _caller_headers(request)
+    # Liveness only ("is the tunnel up"): no agent data, and callers such as
+    # `herald-tunnel status` send no key.
+    if request.method == "GET" and full_path.strip("/") == "health":
+        headers = _caller_headers(request)
+    else:
+        headers = _keyed_headers(request)
     if is_sse:
         return StreamingResponse(
             _sse_generator(device_token, request.method, path, body, headers),
@@ -403,4 +447,4 @@ async def passthrough(full_path: str, request: Request):
         if kept:
             path = f"{path}?{kept}"
 
-    return await _proxy(token, request.method, path, body, _caller_headers(request))
+    return await _proxy(token, request.method, path, body, _keyed_headers(request))

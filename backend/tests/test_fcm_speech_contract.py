@@ -88,9 +88,9 @@ def _capture_payload(monkeypatch, *, title, body, data):
 
     import asyncio
 
-    asyncio.get_event_loop().run_until_complete(
-        tunnel._send_fcm("devtok", title=title, body=body, data=data)
-    )
+    # asyncio.run, not get_event_loop(): there is no current loop once an
+    # async test has run earlier in the session, so this depended on test order.
+    asyncio.run(tunnel._send_fcm("devtok", title=title, body=body, data=data))
     return sent["message"]["data"]
 
 
