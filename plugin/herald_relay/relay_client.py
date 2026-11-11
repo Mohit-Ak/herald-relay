@@ -336,6 +336,19 @@ class HeraldRelayClient:
             # request never stalls the event stream.
             asyncio.create_task(self._handle_forward_request(client, task_payload))
 
+    async def screen_request(self, method: str, path: str, headers: dict, body) -> tuple[int, dict]:
+        """The app's screen calls, on either transport (see local_screen.py)."""
+        from herald_relay import local_screen, tunnel_cli  # noqa: PLC0415
+        try:
+            return await local_screen.handle(
+                method, path, headers or {}, body,
+                hermes_url=self.local_hermes_url, relay_url=self.relay_url,
+                device_token=self.device_token, hermes_home=tunnel_cli.HERMES_HOME,
+                hermes_python=tunnel_cli._hermes_python())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("screen request failed: %s", type(exc).__name__)
+            return 502, {"error": "screen_error", "message": "Couldn't open the screen. Try again."}
+
     async def run_edge(self, edge_url: str) -> None:
         """Run over the Herald edge relay instead of the long-lived SSE stream.
 
@@ -367,6 +380,7 @@ class HeraldRelayClient:
             self._edge = EdgeTunnel(edge_url, self.device_token,
                                     self.local_hermes_url, self.hermes_key)
             self._edge.on_event = on_event
+            self._edge.on_screen = self.screen_request
             self._edge.on_connect = on_connect
             await self._edge.run_forever()
 
@@ -393,6 +407,19 @@ class HeraldRelayClient:
         forwarded = payload.get("headers") or {}
 
         url = f"{self.local_hermes_url}{path}"
+
+        from herald_relay import local_screen  # noqa: PLC0415
+        if local_screen.matches(path):
+            # Answered here, not by Hermes: the app asking to see this
+            # computer's Bot Screen (see local_screen.py).
+            status, answer = await self.screen_request(method, path, forwarded, body)
+            try:
+                await client.post(f"{self.relay_url}/tunnel/http_response", json={
+                    "device_token": self.device_token, "request_id": request_id,
+                    "status": status, "body": answer})
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not return screen answer: %s", exc)
+            return
 
         if wants_stream:
             await self._forward_streaming(client, request_id, method, url, body,
