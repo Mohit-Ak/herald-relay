@@ -45,6 +45,9 @@ class EdgeTunnel:
         self.hermes_key = hermes_key
         self.on_event = None    # optional async callback(dict) for server pushes
         self.on_connect = None  # optional async callback() after each (re)connect
+        # optional async callback(method, path, headers, body) -> (status, dict):
+        # the app's "show me this computer's screen" calls, answered here.
+        self.on_screen = None
         self._inflight: dict[str, asyncio.Task] = {}
         self._stop = asyncio.Event()
         self.connected = asyncio.Event()
@@ -138,6 +141,16 @@ class EdgeTunnel:
                 await ws.send_str(json.dumps(obj))
 
         try:
+            from herald_relay import local_screen  # noqa: PLC0415
+            if self.on_screen and local_screen.matches(path):
+                # The caller's own headers only: never this machine's key.
+                own = {k: v for k, v in (msg.get("headers") or {}).items() if k.lower() in _FORWARD}
+                status, answer = await self.on_screen(method, path, own, body)
+                await send({"t": "res", "id": rid, "status": status,
+                            "headers": {"content-type": "application/json"}})
+                await send({"t": "chunk", "id": rid, "data": json.dumps(answer)})
+                await send({"t": "end", "id": rid})
+                return
             async with self._http.request(
                 method,
                 f"{self.hermes_url}{path}",

@@ -30,6 +30,8 @@ def test_skills_install_into_the_hermes_home(tmp_path):
     # the agent must ask first, and must know macOS/Windows can't
     assert "Never install or start a screen without the user's yes" in screen
     assert "macOS or Windows" in screen
+    # the Herald app opens it from the agent's reply
+    assert "[[herald:connect:screen]]" in screen and "Herald Cloud agents only" not in screen
     assert "browser_vault_fill" in pw and "herald-tunnel passwords import" in pw
     assert "--delete" in pw
     assert "{{" not in pw and "{{" not in screen

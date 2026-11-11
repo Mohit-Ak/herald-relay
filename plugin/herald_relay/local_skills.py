@@ -25,7 +25,7 @@ from pathlib import Path
 SCREEN_SKILL = """---
 name: herald-screen
 description: Show the user a screen they can watch or take over, when a step needs their hands (sign-in, CAPTCHA, 2FA, a GUI-only setting).
-version: 1.0.0
+version: 1.1.0
 author: Herald
 metadata:
   hermes:
@@ -68,10 +68,18 @@ hermes computer-use screen install     # once; asks for sudo
 hermes computer-use screen start
 ```
 
-Then do your browsing with the browser shown on that screen, and tell the
-user how to watch: the Hermes Desktop app shows it under Bot Screen, with
-Take over and Hand back. (Watching from the Herald phone app works for
-Herald Cloud agents only, for now.)
+Then do your browsing with the browser shown on that screen, get as far as
+you can, and say in one or two short sentences what you need, for example:
+"I'm on the bank's sign-in page. Tap Open screen, take over and sign in,
+then hand it back." Put this exact marker on its own at the end of your
+reply:
+
+[[herald:connect:screen]]
+
+The Herald app turns it into an Open screen button (the user never sees the
+marker); there they watch, Take over and Hand back. While they have control
+your screen tools are refused: wait for them. At the computer itself, the
+Hermes Desktop app shows the same screen under Bot Screen.
 
 After they hand it back, look at the screen again before carrying on.
 
