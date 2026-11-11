@@ -71,6 +71,15 @@ async def test_the_phone_leaving_closes_the_computer_side(base):
         assert await closed_with(a) == 1000
 
 
+async def test_a_broken_phone_link_is_told_apart_from_leaving(base):
+    """The computer keeps the agent out for a moment after a broken link (the
+    user may be mid sign-in) but hands control back at once when they leave."""
+    async with agent(base) as a:
+        p = await phone(base).__aenter__()
+        p.transport.abort()                       # the link dies: no close frame
+        assert await closed_with(a) == 4410
+
+
 async def test_another_devices_address_cannot_take_the_viewing(base):
     async with agent(base) as a:
         async with phone(base, token="some-other-device-token-000002") as p:
