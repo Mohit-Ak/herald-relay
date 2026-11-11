@@ -222,6 +222,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     _write_yaml_config(relay_url, token)
     print(f"config written: {HERMES_HOME}/config.yaml (herald.relay_url, herald.device_token)")
+    _install_skills()
 
     if args.no_systemd:
         print("\nRun the tunnel with: herald-tunnel run")
@@ -344,6 +345,63 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _install_skills() -> None:
+    from . import local_skills  # noqa: PLC0415
+    try:
+        local_skills.install(HERMES_HOME)
+        print("skills installed: herald-screen, herald-passwords")
+    except OSError as e:
+        print(f"could not install Herald skills ({type(e).__name__}); "
+              "re-run: herald-tunnel skills", file=sys.stderr)
+
+
+def cmd_skills(args: argparse.Namespace) -> int:
+    _install_skills()
+    return 0
+
+
+def _hermes_python() -> str:
+    """The interpreter Hermes itself runs on (its vault lives in that venv).
+    The `hermes` launcher's shebang names it."""
+    import shutil  # noqa: PLC0415
+    env = os.getenv("HERMES_PYTHON", "")
+    if env:
+        return env
+    launcher = shutil.which("hermes")
+    if launcher:
+        try:
+            first = Path(launcher).read_text(encoding="utf-8", errors="replace").splitlines()[0]
+            if first.startswith("#!") and "python" in first:
+                return first[2:].strip().split()[0]
+        except (OSError, IndexError):
+            pass
+    return ""
+
+
+def cmd_passwords(args: argparse.Namespace) -> int:
+    py = _hermes_python()
+    if not py:
+        print(json.dumps({"error": "hermes_not_found"}))
+        return 2
+    prog = Path(__file__).with_name("passwords_import.py")
+    argv = [py, str(prog)]
+    if args.action == "count":
+        argv.append("--count")
+    else:
+        if not args.file:
+            print(json.dumps({"error": "file_required"}))
+            return 2
+        argv += ["--file", args.file, "--profile", args.profile]
+        if args.delete:
+            argv.append("--delete")
+    env = dict(os.environ, HERMES_HOME=str(HERMES_HOME))
+    r = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=300)
+    # The import program prints one JSON line of counts; pass only that on.
+    lines = (r.stdout or "").strip().splitlines()
+    print(lines[-1] if lines else json.dumps({"error": "no_output"}))
+    return r.returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="herald-tunnel",
@@ -370,6 +428,17 @@ def main() -> int:
 
     p_status = sub.add_parser("status", help="check local Hermes, relay, and tunnel")
     p_status.set_defaults(func=cmd_status)
+
+    p_skills = sub.add_parser("skills", help="(re)install Herald's skills into this Hermes")
+    p_skills.set_defaults(func=cmd_skills)
+
+    p_pw = sub.add_parser("passwords", help="import a Chrome password export into the vault")
+    p_pw.add_argument("action", choices=["import", "count"])
+    p_pw.add_argument("--file", default="")
+    p_pw.add_argument("--profile", default="Chrome")
+    p_pw.add_argument("--delete", action="store_true",
+                      help="delete the export file afterwards")
+    p_pw.set_defaults(func=cmd_passwords)
 
     args = parser.parse_args()
     return args.func(args)
