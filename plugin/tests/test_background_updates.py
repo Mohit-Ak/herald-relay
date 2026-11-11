@@ -109,6 +109,16 @@ class TestRealHermesVocabulary:
 
 class TestLongRunAudibility:
 
+    def test_first_update_is_not_lost_on_a_machine_that_just_booted(self, monkeypatch):
+        """The monotonic clock starts near zero at boot; "never pushed" must
+        not read as "pushed just now"."""
+        from herald_relay import push_triggers
+        monkeypatch.setattr(push_triggers.time, "monotonic", lambda: 12.0)
+        p = PushTriggerPolicy(progress_interval_s=60.0, min_run_duration_for_push_s=10.0)
+        ev = {"type": "tool.completed", "data": {"name": "terminal"}}
+        assert p.should_push(ev, run_duration_s=30.0, run_id="r1")[0] is True
+        assert p.should_push(ev, run_duration_s=31.0, run_id="r1")[0] is False
+
     def test_progress_is_rate_limited_not_silent(self):
         """An hour-long task should speak periodically — but not per tool."""
         p = PushTriggerPolicy(progress_interval_s=60.0,

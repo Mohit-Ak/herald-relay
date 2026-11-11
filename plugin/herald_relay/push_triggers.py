@@ -121,8 +121,11 @@ class PushTriggerPolicy:
             if run_duration_s < self.min_run_duration_for_push_s:
                 return False, "", ""
             now = time.monotonic()
-            last = self._last_progress_at.get(run_id, 0.0)
-            if now - last < self.progress_interval_s:
+            # None = never: the monotonic clock starts near zero at boot, so
+            # "0.0" used to mean "just now" on a machine up for under a minute
+            # and the first update of a run was dropped.
+            last = self._last_progress_at.get(run_id)
+            if last is not None and now - last < self.progress_interval_s:
                 return False, "", ""
             text = data.get("text") or data.get("message")
             if not text:

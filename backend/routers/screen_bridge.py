@@ -41,6 +41,7 @@ CLOSE_BAD_REQUEST = 4400
 CLOSE_UNKNOWN = 4404         # no such viewing (never made, already used, expired)
 CLOSE_NO_PHONE = 4408        # the phone never came
 CLOSE_BUSY = 4429
+CLOSE_PHONE_DROPPED = 4410   # the phone's link broke (not: the user closed the screen)
 
 
 @dataclass
@@ -50,6 +51,10 @@ class _Waiting:
     made: float = field(default_factory=time.monotonic)
     attached: asyncio.Event = field(default_factory=asyncio.Event)
     done: asyncio.Event = field(default_factory=asyncio.Event)
+    # How the computer's socket is closed. It tells the computer whether the
+    # user left on purpose (give control back now) or the phone's link broke
+    # (keep the agent out for a moment: the user may be mid sign-in).
+    close_code: int = 1000
 
 
 _waiting: dict[str, _Waiting] = {}   # sid -> the computer's socket, until a phone takes it
@@ -91,7 +96,7 @@ async def agent_side(ws: WebSocket, sid: str):
     finally:
         _waiting.pop(sid, None)
         slot.done.set()
-        await _close(ws, 1000)
+        await _close(ws, slot.close_code)
 
 
 @router.websocket("/hermes/d/{device_token}/_screen/{sid}")
@@ -115,6 +120,8 @@ async def phone_side(ws: WebSocket, device_token: str, sid: str):
         while True:
             msg = await src.receive()
             if msg.get("type") == "websocket.disconnect":
+                if key == "up" and msg.get("code") not in (1000, 1001):
+                    slot.close_code = CLOSE_PHONE_DROPPED
                 return
             data = msg.get("bytes")
             if data:
