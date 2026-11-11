@@ -348,8 +348,10 @@ def cmd_status(args: argparse.Namespace) -> int:
 def _install_skills() -> None:
     from . import local_skills  # noqa: PLC0415
     try:
-        local_skills.install(HERMES_HOME)
-        print("skills installed: herald-screen, herald-passwords")
+        written = local_skills.install(HERMES_HOME, command=_self_exec(), all_profiles=True)
+        n = len(written) // len(local_skills.SKILLS)
+        print("skills installed: herald-screen, herald-passwords"
+              + (f" (this Hermes and {n - 1} profile{'s' if n != 2 else ''})" if n > 1 else ""))
     except OSError as e:
         print(f"could not install Herald skills ({type(e).__name__}); "
               "re-run: herald-tunnel skills", file=sys.stderr)
@@ -361,20 +363,43 @@ def cmd_skills(args: argparse.Namespace) -> int:
 
 
 def _hermes_python() -> str:
-    """The interpreter Hermes itself runs on (its vault lives in that venv).
-    The `hermes` launcher's shebang names it."""
+    """The interpreter Hermes itself runs on (its vault lives in that venv):
+    HERMES_PYTHON, else the python next to the `hermes` launcher, else the
+    one its shebang names. Never something that isn't a python: a launcher
+    that is a shell script (`#!/bin/sh`) or `#!/usr/bin/env python3` used to
+    hand back `/bin/sh` or `/usr/bin/env`."""
+    import shlex  # noqa: PLC0415
     import shutil  # noqa: PLC0415
-    env = os.getenv("HERMES_PYTHON", "")
-    if env:
-        return env
-    launcher = shutil.which("hermes")
+    cands = [os.getenv("HERMES_PYTHON", "")]
+    # PATH first, then where Hermes' installer puts things: a service or a
+    # non-login shell often has no ~/.local/bin on PATH (seen on a real box:
+    # "hermes_not_found" with Hermes installed and running).
+    launcher = shutil.which("hermes") or next(
+        (str(c) for c in (Path.home() / ".local/bin/hermes",
+                          Path.home() / ".hermes/hermes-agent/venv/bin/hermes",
+                          Path("/usr/local/bin/hermes"))
+         if os.access(c, os.X_OK)), "")
     if launcher:
+        real = Path(launcher).resolve()
+        cands += [str(real.parent / "python"), str(real.parent / "python3")]
         try:
-            first = Path(launcher).read_text(encoding="utf-8", errors="replace").splitlines()[0]
-            if first.startswith("#!") and "python" in first:
-                return first[2:].strip().split()[0]
-        except (OSError, IndexError):
-            pass
+            with open(real, "rb") as f:
+                first = f.readline(300).decode("utf-8", "replace").strip()
+        except OSError:
+            first = ""
+        if first.startswith("#!"):
+            try:
+                parts = shlex.split(first[2:])
+            except ValueError:
+                parts = []
+            if parts and Path(parts[0]).name == "env":
+                parts = [shutil.which(x) or "" for x in parts[1:2]]
+            cands += parts[:1]
+    cands += [str(Path.home() / ".hermes/hermes-agent/venv/bin/python"),
+              "/usr/local/lib/hermes/hermes-agent/venv/bin/python"]
+    for c in cands:
+        if c and "python" in Path(c).name and os.access(c, os.X_OK):
+            return c
     return ""
 
 

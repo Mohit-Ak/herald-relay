@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-herald"
-version = "0.2.0"
+version = "0.3.0"
 description = "Herald Relay plugin for Hermes — voice-first AI on mobile"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,12 @@ dependencies = [
     # bare box must not fail at `herald-tunnel setup` with ModuleNotFoundError.
     "pyyaml>=6.0",
 ]
+
+[project.optional-dependencies]
+# The test suite: `pip install -e "plugin[dev]"`. Without pytest-asyncio the
+# async tests are collected and fail with "async def functions are not
+# natively supported".
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 
 [project.scripts]
 herald-tunnel = "herald_relay.tunnel_cli:main"

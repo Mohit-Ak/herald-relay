@@ -8,9 +8,14 @@ herald docs/internal/plans/screen-passwords-contract.md):
     the agent from an export file the user gives it, filled with
     browser_vault_fill. The agent never sees a password.
 
-Written into ~/.hermes/skills/herald/<name>/SKILL.md. Re-running setup (or
-`herald-tunnel skills`) rewrites them; nothing else in the skills dir is
-touched.
+Written into ~/.hermes/skills/herald/<name>/SKILL.md, and the same under
+every profile in ~/.hermes/profiles/ (each profile is its own agent with its
+own skills and its own vault). Re-running setup (or `herald-tunnel skills`)
+rewrites them; nothing else in the skills dir is touched.
+
+The import command in the skill is written out in full for THIS install
+(`{{herald_tunnel}}`): herald-tunnel lives in its own venv, which is not on the
+agent's PATH.
 """
 from __future__ import annotations
 
@@ -42,6 +47,9 @@ hermes computer-use screen status 2>&1 | head -5
 
 * **Linux:** Hermes' Bot Screen is a private desktop just for you (not the
   user's own screen). It needs a one-time install with sudo.
+* **"'screen' is not a `hermes computer-use` command":** this Hermes is too
+  old to have Bot Screen. Say so in one sentence and offer to update Hermes
+  (`hermes update`); don't try to build a screen some other way.
 * **macOS or Windows:** there is no private desktop for an agent here.
   Sharing would mean the user's real screen, which needs their approval in
   system settings. Tell them in one sentence it isn't available on this
@@ -97,6 +105,13 @@ usernames are there, never the passwords.
    that exact site. Hermes types the password; you never see it.
 3. A code from their phone: `browser_vault_enter_code`.
 
+## They use 1Password or Bitwarden
+
+Nothing to import, as long as that manager's command-line tool (`op` or
+`bw`) is installed on this computer. Hermes reads it directly:
+`browser_vault_list` shows those logins too, and says when it is locked. `browser_vault_unlock` asks the user
+for their master password on their own screen; you never see it.
+
 ## Importing their Chrome passwords
 
 When the user wants you to use their Chrome passwords, or a login you need
@@ -109,14 +124,16 @@ isn't saved:
    plain-text file doesn't stay on disk):
 
 ```
-herald-tunnel passwords import --file "<path they gave>" --profile "<profile name>" --delete
+{{herald_tunnel}} passwords import --file "<path they gave>" --profile "<profile name>" --delete
 ```
 
-If `herald-tunnel` isn't on PATH, it is `~/.herald-relay/bin/herald-tunnel`.
+Run it exactly as written; it is not on PATH under a shorter name.
 
 3. Tell them how many logins were saved. For another Chrome profile, repeat.
+   `not_a_password_export` means that file isn't a password export (it is
+   left untouched): ask them for the right one.
 
-Check how many are saved: `herald-tunnel passwords count`.
+Check how many are saved: `{{herald_tunnel}} passwords count`.
 
 ## Never
 
@@ -129,15 +146,37 @@ Check how many are saved: `herald-tunnel passwords count`.
 SKILLS = {"herald-screen": SCREEN_SKILL, "herald-passwords": PASSWORDS_SKILL}
 
 
-def install(hermes_home: Path) -> list[Path]:
-    """Write the skills; returns the files written."""
+def homes(hermes_home: Path) -> list[Path]:
+    """This Hermes home and every profile under it."""
+    root = Path(hermes_home)
+    out = [root]
+    try:
+        out += sorted(p for p in (root / "profiles").iterdir()
+                      if p.is_dir() and not p.name.startswith("."))
+    except OSError:
+        pass
+    return out
+
+
+def install(hermes_home: Path, command: str = "herald-tunnel",
+            all_profiles: bool = False) -> list[Path]:
+    """Write the skills; returns the files written. `command` is how to run
+    herald-tunnel on this machine. A profile that can't be written is
+    skipped, not fatal."""
     written = []
-    for name, text in SKILLS.items():
-        d = Path(hermes_home) / "skills" / "herald" / name
-        d.mkdir(parents=True, exist_ok=True)
-        p = d / "SKILL.md"
-        tmp = p.with_suffix(".md.tmp")
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, p)
-        written.append(p)
+    first = True
+    for home in (homes(hermes_home) if all_profiles else [Path(hermes_home)]):
+        try:
+            for name, text in SKILLS.items():
+                d = home / "skills" / "herald" / name
+                d.mkdir(parents=True, exist_ok=True)
+                p = d / "SKILL.md"
+                tmp = p.with_suffix(".md.tmp")
+                tmp.write_text(text.replace("{{herald_tunnel}}", command), encoding="utf-8")
+                os.replace(tmp, p)
+                written.append(p)
+        except OSError:
+            if first:
+                raise
+        first = False
     return written
