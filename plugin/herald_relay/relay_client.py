@@ -338,16 +338,20 @@ class HeraldRelayClient:
 
     async def screen_request(self, method: str, path: str, headers: dict, body) -> tuple[int, dict]:
         """The app's screen calls, on either transport (see local_screen.py)."""
-        from herald_relay import local_screen, tunnel_cli  # noqa: PLC0415
+        from herald_relay import local_passwords, local_screen, tunnel_cli  # noqa: PLC0415
         try:
+            if local_passwords.matches(path):
+                return await local_passwords.handle(
+                    method, path, headers or {}, body, hermes_url=self.local_hermes_url,
+                    hermes_home=tunnel_cli.HERMES_HOME, hermes_python=tunnel_cli._hermes_python())
             return await local_screen.handle(
                 method, path, headers or {}, body,
                 hermes_url=self.local_hermes_url, relay_url=self.relay_url,
                 device_token=self.device_token, hermes_home=tunnel_cli.HERMES_HOME,
                 hermes_python=tunnel_cli._hermes_python())
         except Exception as exc:  # noqa: BLE001
-            logger.warning("screen request failed: %s", type(exc).__name__)
-            return 502, {"error": "screen_error", "message": "Couldn't open the screen. Try again."}
+            logger.warning("app request failed: %s", type(exc).__name__)
+            return 502, {"error": "screen_error", "message": "That didn't work. Try again."}
 
     async def run_edge(self, edge_url: str) -> None:
         """Run over the Herald edge relay instead of the long-lived SSE stream.
@@ -408,8 +412,8 @@ class HeraldRelayClient:
 
         url = f"{self.local_hermes_url}{path}"
 
-        from herald_relay import local_screen  # noqa: PLC0415
-        if local_screen.matches(path):
+        from herald_relay import local_passwords, local_screen  # noqa: PLC0415
+        if local_screen.matches(path) or local_passwords.matches(path):
             # Answered here, not by Hermes: the app asking to see this
             # computer's Bot Screen (see local_screen.py).
             status, answer = await self.screen_request(method, path, forwarded, body)

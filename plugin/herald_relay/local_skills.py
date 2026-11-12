@@ -94,7 +94,7 @@ After they hand it back, look at the screen again before carrying on.
 PASSWORDS_SKILL = """---
 name: herald-passwords
 description: Sign in to websites with the user's saved Chrome passwords (vault), and import their Chrome password export into the vault.
-version: 1.0.0
+version: 1.1.0
 author: Herald
 metadata:
   hermes:
@@ -124,6 +124,17 @@ for their master password on their own screen; you never see it.
 
 When the user wants you to use their Chrome passwords, or a login you need
 isn't saved:
+
+If the export is on their PHONE (they are talking to you in the Herald app),
+don't ask for a path: say "Tap Add passwords and choose your Chrome export"
+and put this exact marker on its own at the end of your reply:
+
+[[herald:connect:passwords]]
+
+The Herald app turns it into an Add passwords button (the user never sees
+the marker) and sends the file straight into the vault on this computer.
+
+If the export is on THIS computer:
 
 1. Tell them how to export, in plain words: Chrome, then Settings > Passwords
    and autofill > Google Password Manager > Settings > Export passwords. Once
