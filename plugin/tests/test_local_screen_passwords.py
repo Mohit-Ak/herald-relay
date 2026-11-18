@@ -23,7 +23,7 @@ CSV = ("name,url,username,password,note\n"
 def test_skills_install_into_the_hermes_home(tmp_path):
     written = local_skills.install(tmp_path)
     names = {p.parent.name for p in written}
-    assert names == {"herald-screen", "herald-passwords"}
+    assert names == {"herald-screen", "herald-passwords", "herald-cards"}
     screen = (tmp_path / "skills/herald/herald-screen/SKILL.md").read_text()
     pw = (tmp_path / "skills/herald/herald-passwords/SKILL.md").read_text()
     assert screen.startswith("---\nname: herald-screen\n")
@@ -37,7 +37,7 @@ def test_skills_install_into_the_hermes_home(tmp_path):
     assert "{{" not in pw and "{{" not in screen
     # re-running overwrites, never duplicates
     local_skills.install(tmp_path)
-    assert len(list((tmp_path / "skills/herald").iterdir())) == 2
+    assert len(list((tmp_path / "skills/herald").iterdir())) == 3
 
 
 def test_setup_installs_the_skills(tmp_path, monkeypatch):
