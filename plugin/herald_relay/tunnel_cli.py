@@ -350,7 +350,7 @@ def _install_skills() -> None:
     try:
         written = local_skills.install(HERMES_HOME, command=_self_exec(), all_profiles=True)
         n = len(written) // len(local_skills.SKILLS)
-        print("skills installed: herald-screen, herald-passwords"
+        print("skills installed: " + ", ".join(local_skills.SKILLS)
               + (f" (this Hermes and {n - 1} profile{'s' if n != 2 else ''})" if n > 1 else ""))
     except OSError as e:
         print(f"could not install Herald skills ({type(e).__name__}); "
