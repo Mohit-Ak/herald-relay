@@ -141,8 +141,9 @@ class EdgeTunnel:
                 await ws.send_str(json.dumps(obj))
 
         try:
-            from herald_relay import local_passwords, local_screen  # noqa: PLC0415
-            if self.on_screen and (local_screen.matches(path) or local_passwords.matches(path)):
+            from herald_relay import local_memory, local_passwords, local_screen  # noqa: PLC0415
+            if self.on_screen and (local_screen.matches(path) or local_passwords.matches(path)
+                                   or local_memory.matches(path)):
                 # The caller's own headers only: never this machine's key.
                 own = {k: v for k, v in (msg.get("headers") or {}).items() if k.lower() in _FORWARD}
                 status, answer = await self.on_screen(method, path, own, body)

@@ -338,8 +338,12 @@ class HeraldRelayClient:
 
     async def screen_request(self, method: str, path: str, headers: dict, body) -> tuple[int, dict]:
         """The app's screen calls, on either transport (see local_screen.py)."""
-        from herald_relay import local_passwords, local_screen, tunnel_cli  # noqa: PLC0415
+        from herald_relay import local_memory, local_passwords, local_screen, tunnel_cli  # noqa: PLC0415
         try:
+            if local_memory.matches(path):
+                return await local_memory.handle(
+                    method, path, headers or {}, body, hermes_url=self.local_hermes_url,
+                    hermes_home=tunnel_cli.HERMES_HOME, hermes_python=tunnel_cli._hermes_python())
             if local_passwords.matches(path):
                 return await local_passwords.handle(
                     method, path, headers or {}, body, hermes_url=self.local_hermes_url,
@@ -412,8 +416,8 @@ class HeraldRelayClient:
 
         url = f"{self.local_hermes_url}{path}"
 
-        from herald_relay import local_passwords, local_screen  # noqa: PLC0415
-        if local_screen.matches(path) or local_passwords.matches(path):
+        from herald_relay import local_memory, local_passwords, local_screen  # noqa: PLC0415
+        if local_screen.matches(path) or local_passwords.matches(path) or local_memory.matches(path):
             # Answered here, not by Hermes: the app asking to see this
             # computer's Bot Screen (see local_screen.py).
             status, answer = await self.screen_request(method, path, forwarded, body)
