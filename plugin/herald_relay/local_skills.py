@@ -9,6 +9,8 @@ herald docs/internal/plans/screen-passwords-contract.md):
     browser_vault_fill. The agent never sees a password.
   * herald-cards: when the user is on the Herald app, show results,
     comparisons, lists, progress and choices as cards, unasked.
+  * herald-memory: "forget that I ...": find every copy, confirm, remove,
+    verify, report; never touch Herald's own entry.
 
 Written into ~/.hermes/skills/herald/<name>/SKILL.md, and the same under
 every profile in ~/.hermes/profiles/ (each profile is its own agent with its
@@ -299,8 +301,70 @@ Hi Sam, Thursday at 3 works. See you at the office.
 ```
 """
 
+# "Forget that I ..." and what the agent remembers (herald issue #403). The
+# canonical text is herald's backend/cloud/skills/herald-memory/SKILL.md; this
+# must stay identical (herald's test_memory_screen checks it).
+MEMORY_SKILL = """---
+name: herald-memory
+description: Use when the user asks you to forget something ("forget that I...", "stop remembering...", "delete what you know about..."), or asks what you remember about them. Find every copy, confirm, remove, verify, report.
+version: 1.0.0
+author: Herald
+metadata:
+  hermes:
+    tags: [Herald, memory, forget, privacy, USER.md, MEMORY.md]
+---
+
+# Herald: what you remember, and forgetting on request
+
+The user can see and edit your saved memory in the Herald app (Memory, per
+agent). They can also ask you, by voice or in chat, to forget something. Treat
+a forget request as a promise: when you say it is gone, it must be gone.
+
+## "Forget that I ..."
+
+1. **Find every copy first. Change nothing yet.** Look in all of these:
+   * your memory, both targets: `user` (USER.md) and `memory` (MEMORY.md).
+     Read the entries you were given and match by meaning, not only words
+     ("I live in Leeds" also covers "moved to Leeds in May").
+   * your skills: `grep -ril "<key words>" ~/.hermes/skills` (skills you
+     wrote about the user, their accounts or their habits).
+   * notes and files you created for the user, if you keep any (for example
+     under `~/.hermes/` or a notes folder you were told about). Search, don't
+     guess.
+   Never search or touch the vault, `.env`, or credentials.
+2. **Say where it is, briefly, and ask.** One or two sentences, fit to be
+   spoken: "I have that in two places: my notes about you, and the trip
+   planning skill. Shall I remove it from both?" If you found nothing, say so
+   and stop.
+3. **Only after a clear yes, remove it.** Memory: the `memory` tool with
+   `remove` (or `replace` to keep the rest of an entry that holds other
+   facts). Skills and files: edit out just that fact; delete a file only if
+   it held nothing else, and say you did.
+4. **Verify.** Search again the same way. Anything left: remove it, then
+   search again.
+5. **Report what was removed**, in one or two sentences: where, and that
+   you won't bring it up again. If part of it is still in past conversation
+   history (which you can't edit), say so in one sentence.
+
+On a voice call keep every reply short; the confirmation is a yes/no
+question. Never forget something the user did not ask about, and never
+remove a whole entry when only one fact in it was asked about.
+
+## Herald's entry is not yours to change
+
+An entry starting `Herald account:` is written by Herald (the user's name
+and how they reach you). Don't edit or remove it, even inside a forget
+request. If the user wants their name changed, tell them it is set in the
+Herald app (their agent's settings) and leave the entry alone.
+
+## "What do you remember about me?"
+
+Answer from your memory in plain words, a short spoken summary first. Tell
+them they can see and edit each entry in the Herald app under Memory.
+"""
+
 SKILLS = {"herald-screen": SCREEN_SKILL, "herald-passwords": PASSWORDS_SKILL,
-          "herald-cards": CARDS_SKILL}
+          "herald-cards": CARDS_SKILL, "herald-memory": MEMORY_SKILL}
 
 
 def homes(hermes_home: Path) -> list[Path]:
