@@ -53,11 +53,11 @@ def _private_dir() -> str | None:
     return None
 
 
-async def _run(py: str, home: Path, args: list[str], timeout: float) -> tuple[int, dict]:
+async def _run(py, home: Path, args: list[str], timeout: float) -> tuple[int, dict]:
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     env["HERMES_HOME"] = str(home)
     proc = await asyncio.create_subprocess_exec(
-        py, str(_PROG), *args, stdin=asyncio.subprocess.DEVNULL,
+        *local_screen.argv_of(py), str(_PROG), *args, stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=env)
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout)
@@ -78,7 +78,7 @@ def _safe(err) -> str:
 
 
 async def handle(method: str, path: str, headers: dict, body, *, hermes_url: str,
-                 hermes_home: Path, hermes_python: str) -> tuple[int, dict]:
+                 hermes_home: Path, hermes_python) -> tuple[int, dict]:
     m = _ROUTE.match((path or "").split("?", 1)[0])
     if m is None:
         return _err(404, "not_found", "Not found.")

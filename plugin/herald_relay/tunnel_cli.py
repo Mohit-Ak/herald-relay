@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -403,13 +404,89 @@ def _hermes_python() -> str:
     return ""
 
 
+# Runs a helper script under Hermes' own runtime the way Hermes' launcher does:
+# isolated (-I), Hermes' checkout first on sys.path, then hermes_bootstrap,
+# which puts Hermes' managed environment (aiohttp and the rest) on the path.
+#   argv: python -I -c BOOT <hermes checkout> <script> [args...]
+_BOOT = (
+    "import os, sys, runpy\n"
+    "for k in ('PYTHONHOME', 'PYTHONPATH', 'VIRTUAL_ENV'): os.environ.pop(k, None)\n"
+    "root, script = sys.argv[1], sys.argv[2]\n"
+    "sys.argv = [script] + sys.argv[3:]\n"
+    "sys.path.insert(0, root)\n"
+    "try:\n"
+    "    import hermes_bootstrap\n"
+    "except ImportError:\n"
+    "    pass\n"
+    "runpy.run_path(script, run_name='__main__')\n"
+)
+_RUNTIME_ROOT = re.compile(r"sys\.path\.insert\(0,\s*(['\"])(?P<root>[^'\"]+)\1\)")
+_cmd_cache: dict = {"at": 0.0, "cmd": []}
+
+
+def _hermes_launchers() -> list[str]:
+    import shutil  # noqa: PLC0415
+    out = [shutil.which("hermes") or ""]
+    out += [str(c) for c in (Path.home() / ".local/bin/hermes",
+                             Path.home() / ".hermes/hermes-agent/.hermes/bin/hermes",
+                             Path("/usr/local/bin/hermes"))]
+    seen: list[str] = []
+    for c in out:
+        if c and c not in seen and os.access(c, os.X_OK):
+            seen.append(c)
+    return seen
+
+
+def _runtime_command() -> list[str]:
+    """Hermes 0.23+ has no venv: its launcher is a shell script that execs a
+    managed interpreter with Hermes' checkout put on sys.path by hand. Ask the
+    launcher (`--print-runtime-command`, its machine-readable contract) which
+    interpreter and checkout it uses. Empty when the launcher predates it."""
+    import subprocess  # noqa: PLC0415
+    for launcher in _hermes_launchers():
+        try:
+            done = subprocess.run([launcher, "--print-runtime-command"], capture_output=True,
+                                  timeout=20, stdin=subprocess.DEVNULL, check=False)
+            cmd = json.loads(done.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+        except Exception:  # noqa: BLE001  an old launcher runs Hermes and prints help or an error
+            continue
+        if not (isinstance(cmd, list) and cmd and all(isinstance(x, str) for x in cmd)):
+            continue
+        py = cmd[0]
+        m = _RUNTIME_ROOT.search(" ".join(cmd[1:]))
+        if not (m and "python" in Path(py).name and os.access(py, os.X_OK)):
+            continue
+        root = m.group("root")
+        if (Path(root) / "hermes_constants.py").is_file():
+            return [py, "-I", "-c", _BOOT, root]
+    return []
+
+
+def _hermes_command() -> list[str]:
+    """argv prefix that runs a helper script with Hermes' own code importable:
+    `[*prefix, script, *args]`. Empty when Hermes isn't found. Cached for a
+    minute (an update can move the managed interpreter)."""
+    import time  # noqa: PLC0415
+    if os.getenv("HERMES_PYTHON"):
+        return [os.environ["HERMES_PYTHON"]]
+    now = time.monotonic()
+    if _cmd_cache["cmd"] and now - _cmd_cache["at"] < 60:
+        return list(_cmd_cache["cmd"])
+    cmd = _runtime_command()
+    if not cmd:
+        py = _hermes_python()
+        cmd = [py] if py else []
+    _cmd_cache.update(at=now, cmd=cmd)
+    return list(cmd)
+
+
 def cmd_passwords(args: argparse.Namespace) -> int:
-    py = _hermes_python()
-    if not py:
+    cmd = _hermes_command()
+    if not cmd:
         print(json.dumps({"error": "hermes_not_found"}))
         return 2
     prog = Path(__file__).with_name("passwords_import.py")
-    argv = [py, str(prog)]
+    argv = [*cmd, str(prog)]
     if args.action == "count":
         argv.append("--count")
     else:
