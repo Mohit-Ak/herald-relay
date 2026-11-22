@@ -156,3 +156,58 @@ def test_hermes_is_found_without_it_on_path(tmp_path, monkeypatch):
     assert tunnel_cli._hermes_python() == str(py)
     py.unlink()
     assert tunnel_cli._hermes_python() == ""
+
+
+def _fake_launcher(tmp_path, checkout, py):
+    """A Hermes 0.23 launcher: a shell script that prints its runtime command."""
+    cmd = [str(py), "-I", "-c",
+           f"import os, sys, runpy; sys.path.insert(0, '{checkout}'); import hermes_bootstrap; "
+           "runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"]
+    launcher = tmp_path / "bin/hermes"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    payload = tmp_path / "bin/runtime.json"
+    payload.write_text(json.dumps(cmd) + "\n")
+    launcher.write_text("#!/bin/sh\n"
+                        "if [ \"$1\" = --print-runtime-command ]; then\n"
+                        f"  cat '{payload}'\n"
+                        "  exit 0\nfi\nexit 1\n")
+    launcher.chmod(0o755)
+    return launcher
+
+
+def test_a_venvless_hermes_runs_helpers_with_its_own_runtime(tmp_path, monkeypatch):
+    """#504: on Hermes 0.23 there is no venv and `hermes` is a /bin/sh script;
+    helpers must run with Hermes' checkout + hermes_bootstrap on the path, or
+    the screen reads as hermes_too_old."""
+    checkout = tmp_path / "hermes-agent"
+    (checkout / "tools/bot_desktop").mkdir(parents=True)
+    (checkout / "tools/__init__.py").write_text("")
+    (checkout / "tools/bot_desktop/__init__.py").write_text("MARK = 'ok'\n")
+    (checkout / "hermes_constants.py").write_text("")
+    (checkout / "hermes_bootstrap.py").write_text("import os\nos.environ['BOOTED'] = '1'\n")
+    launcher = _fake_launcher(tmp_path, checkout, Path(sys.executable))
+    monkeypatch.delenv("HERMES_PYTHON", raising=False)
+    monkeypatch.setenv("PATH", f"{launcher.parent}:/usr/bin:/bin")
+    tunnel_cli._cmd_cache.update(at=0.0, cmd=[])
+    cmd = tunnel_cli._hermes_command()
+    assert cmd[:3] == [sys.executable, "-I", "-c"] and cmd[-1] == str(checkout)
+    probe = tmp_path / "probe.py"
+    probe.write_text("import os, sys\nfrom tools.bot_desktop import MARK\n"
+                     "print(MARK, os.environ.get('BOOTED'), sys.argv[1:])\n")
+    out = __import__("subprocess").run([*cmd, str(probe), "--count"], capture_output=True, text=True,
+                                       env={"PYTHONPATH": "/nowhere", "PATH": "/usr/bin:/bin"})
+    assert out.stdout.strip() == "ok 1 ['--count']", out.stderr
+
+
+def test_an_old_launcher_falls_back_to_the_venv_python(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    venv = home / ".hermes/hermes-agent/venv/bin"
+    venv.mkdir(parents=True)
+    py = venv / "python"
+    py.write_text("#!/bin/sh\nexit 3\n")         # --print-runtime-command prints nothing useful
+    py.chmod(0o755)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.delenv("HERMES_PYTHON", raising=False)
+    tunnel_cli._cmd_cache.update(at=0.0, cmd=[])
+    assert tunnel_cli._hermes_command() == [str(py)]

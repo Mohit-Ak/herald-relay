@@ -20,6 +20,11 @@ The job arrives on stdin, never argv (argv is visible to every local user):
      "viewer_id": "…", "mode": "watch"|"control", "release": ["<older viewer id>", …]}
     {"op": "status"}     -> one JSON line: supported / installed / running
     {"op": "start"}      -> starts the screen (never installs), then as status
+    {"op": "setup"}      -> the user tapped "Set up screen" in the app: install
+                            the packages (only where sudo needs no password;
+                            never asks for one) and start. Prints `started`,
+                            then keeps going detached; progress goes to
+                            <HERMES_HOME>/bot-desktop/herald-setup.json.
 
 `pipe` prints exactly one line: `ready` once the relay socket is open, or
 `error <code>`. Nothing secret is ever printed or logged.
@@ -62,7 +67,75 @@ def status(start: bool = False) -> int:
     st = runtime.status()
     out.update(supported=bool(st.supported), installed=bool(st.installed),
                running=bool(st.running), blocker=st.blocker)
+    if st.supported and not st.installed:
+        out["can_set_up"] = _can_install_unattended(runtime)
     say(json.dumps(out))
+    return 0
+
+
+def _can_install_unattended(runtime) -> bool:
+    """The app may set the screen up with one tap only where nobody has to
+    type a password: root, or sudo that asks for none."""
+    try:
+        if runtime.install_command() is None or not runtime.installable():
+            return False
+        if runtime.is_root():
+            return True
+        from tools.bot_desktop import install
+        return bool(install._sudo_nopasswd())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+SETUP_FILE = "herald-setup.json"
+
+
+def _write_setup(path: Path, **state) -> None:
+    import os
+    state.setdefault("at", time.time())
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, path)
+
+
+def setup() -> int:
+    """Install (when needed) and start this profile's screen. One line:
+    `started` once the work is under way, or `error <code>`."""
+    import os
+    try:
+        from hermes_constants import get_hermes_home
+        from tools.bot_desktop import install, runtime
+    except Exception:  # noqa: BLE001
+        say("error hermes_too_old")
+        return 2
+    sd = Path(get_hermes_home()) / "bot-desktop"
+    sd.mkdir(parents=True, exist_ok=True)
+    path = sd / SETUP_FILE
+    st = runtime.status()
+    if not st.supported:
+        say("error unsupported_os")
+        return 3
+    if not st.installed and not _can_install_unattended(runtime):
+        say("error needs_password")
+        return 3
+    _write_setup(path, state="running", pid=os.getpid(), step="start" if st.installed else "install")
+    say("started")
+    lines: list[str] = []
+    try:
+        if not st.installed:
+            rc = install.install_packages(ask_password=lambda: "",
+                                          on_line=lambda line: lines.append(str(line)[-200:]))
+            if rc != 0:
+                _write_setup(path, state="failed", code="install_failed",
+                             message="Installing the screen didn't finish"
+                             + (f": {lines[-1]}" if lines else "."))
+                return 4
+            _write_setup(path, state="running", pid=os.getpid(), step="start")
+        runtime.start()
+    except Exception as exc:  # noqa: BLE001  the message names the blocker in plain words
+        _write_setup(path, state="failed", code="start_failed", message=str(exc)[:300])
+        return 4
+    _write_setup(path, state="done")
     return 0
 
 
@@ -193,6 +266,8 @@ def main() -> int:
     op = job.get("op") or "pipe"
     if op in ("status", "start"):
         return status(start=op == "start")
+    if op == "setup":
+        return setup()
     return asyncio.run(run(job))
 
 

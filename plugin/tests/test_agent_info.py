@@ -287,7 +287,7 @@ async def test_sse_transport_answers_from_the_tunnel(stock, home, monkeypatch):
     """The older SSE tunnel routes the same paths through the tunnel, not raw Hermes."""
     from herald_relay import relay_client, tunnel_cli
     monkeypatch.setattr(tunnel_cli, "HERMES_HOME", home)
-    monkeypatch.setattr(tunnel_cli, "_hermes_python", lambda: "")
+    monkeypatch.setattr(tunnel_cli, "_hermes_command", lambda: [])
     posted = []
 
     class Client:

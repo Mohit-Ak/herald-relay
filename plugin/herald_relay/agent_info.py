@@ -45,6 +45,13 @@ logger = logging.getLogger("herald.agent_info")
 _ROUTE = re.compile(
     r"^(?:/p/(?P<profile>[A-Za-z0-9][A-Za-z0-9_.-]{0,63}))?/(?P<what>api/soul|v1/skills)/?$")
 _HELPER = Path(__file__).with_name("agent_info_helper.py")
+
+
+def _argv_of(py) -> list[str]:
+    """A path (Hermes in a venv) or an argv prefix (tunnel_cli._hermes_command)."""
+    if not py:
+        return []
+    return [py] if isinstance(py, str) else [str(x) for x in py]
 HELPER_TIMEOUT_S = 30.0
 UPSTREAM_TIMEOUT_S = 30.0
 # Same caps Hermes' own loaders use in spirit: one persona file, a sane skill tree.
@@ -79,7 +86,7 @@ async def _upstream(hermes_url: str, path: str, auth: str):
                 return r.status, None
 
 
-async def _from_hermes(py: str, home: Path, op: str) -> dict | None:
+async def _from_hermes(py, home: Path, op: str) -> dict | None:
     """Run agent_info_helper.py with Hermes' interpreter; its JSON, or None."""
     if not py:
         return None
@@ -87,7 +94,7 @@ async def _from_hermes(py: str, home: Path, op: str) -> dict | None:
     env["HERMES_HOME"] = str(home)
     try:
         proc = await asyncio.create_subprocess_exec(
-            py, str(_HELPER), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            *_argv_of(py), str(_HELPER), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, env=env, start_new_session=True)
     except OSError:
         return None
@@ -194,7 +201,7 @@ async def _caller_owns(hermes_url: str, prefix: str, auth: str) -> bool:
 
 
 async def handle(method: str, path: str, headers: dict, body, *, hermes_url: str,
-                 hermes_home: Path, hermes_python: str) -> tuple[int, dict | list]:
+                 hermes_home: Path, hermes_python) -> tuple[int, dict | list]:
     m = _ROUTE.match((path or "").split("?", 1)[0])
     if m is None:
         return 404, {"error": "not_found", "message": "Not found."}

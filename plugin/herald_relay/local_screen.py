@@ -5,6 +5,9 @@ address local Hermes never sees:
 
     GET  [/p/<profile>]/_herald/screen           {available, enabled, reason}
     POST [/p/<profile>]/_herald/screen/enable    start it (never installs)
+    POST [/p/<profile>]/_herald/screen/setup     the user tapped "Set up screen":
+                                                 install + start, in the background,
+                                                 only where sudo needs no password
     POST [/p/<profile>]/_herald/screen           {mode} -> {ws_url, mode, expires_in}
 
 Who may ask: whoever holds THAT profile's API key. The relay refuses requests
@@ -32,7 +35,7 @@ import aiohttp
 
 logger = logging.getLogger("herald.screen")
 
-_ROUTE = re.compile(r"^(?:/p/(?P<profile>[A-Za-z0-9][A-Za-z0-9_.-]{0,63}))?/_herald/screen(?P<rest>/enable)?/?$")
+_ROUTE = re.compile(r"^(?:/p/(?P<profile>[A-Za-z0-9][A-Za-z0-9_.-]{0,63}))?/_herald/screen(?P<rest>/enable|/setup)?/?$")
 MODES = ("watch", "control")
 LINK_TTL_S = 60
 MAX_PIPES_PER_PROFILE = 4
@@ -73,12 +76,12 @@ async def _caller_owns(hermes_url: str, prefix: str, headers: dict) -> bool:
         return False
 
 
-async def _helper(py: str, home: Path, job: dict, *, wait_line: float):
+async def _helper(py, home: Path, job: dict, *, wait_line: float):
     """Start screen_pipe.py for `home`; (process, its first output line)."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     env["HERMES_HOME"] = str(home)
     proc = await asyncio.create_subprocess_exec(
-        py, str(_PIPE), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        *argv_of(py), str(_PIPE), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL, env=env, start_new_session=True)
     proc.stdin.write(json.dumps(job).encode())
     await proc.stdin.drain()
@@ -90,7 +93,7 @@ async def _helper(py: str, home: Path, job: dict, *, wait_line: float):
     return proc, line
 
 
-async def _status(py: str, home: Path, start: bool = False) -> dict:
+async def _status(py, home: Path, start: bool = False) -> dict:
     proc, line = await _helper(py, home, {"op": "start" if start else "status"},
                                wait_line=40 if start else 15)
     try:
@@ -103,8 +106,37 @@ async def _status(py: str, home: Path, start: bool = False) -> dict:
         return {"error": "status_failed"}
 
 
-def _public(st: dict) -> dict:
-    """What the app shows. `reason` says why a screen can't be opened here."""
+SETUP_STALE_S = 30 * 60
+
+
+def _setup_state(home: Path) -> dict:
+    """The last one-tap setup (screen_pipe.py `setup`): running / failed / done."""
+    try:
+        st = json.loads((home / "bot-desktop" / "herald-setup.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(st, dict):
+        return {}
+    if st.get("state") == "running":
+        pid = st.get("pid")
+        alive = False
+        if isinstance(pid, int) and pid > 0:
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except PermissionError:
+                alive = True
+            except OSError:
+                alive = False
+        if not alive or time.time() - float(st.get("at") or 0) > SETUP_STALE_S:
+            return {"state": "failed", "code": "setup_stopped",
+                    "message": "Setting up the screen stopped before it finished."}
+    return st
+
+
+def _public(st: dict, setup: dict | None = None) -> dict:
+    """What the app shows. `reason` says why a screen can't be opened here;
+    `can_set_up` that one tap (POST …/setup) can fix `not_installed`."""
     if st.get("error") == "hermes_too_old":
         reason = "hermes_too_old"
     elif st.get("error"):
@@ -115,13 +147,50 @@ def _public(st: dict) -> dict:
         reason = "not_installed"
     else:
         reason = None
-    out = {"available": reason is None, "enabled": bool(st.get("running")) and reason is None,
-           "enabling": False, "failed": bool(st.get("start_error"))}
+    setup = setup or {}
+    enabled = bool(st.get("running")) and reason is None
+    setting_up = setup.get("state") == "running" and not enabled
+    setup_failed = setup.get("state") == "failed" and not enabled
+    out = {"available": reason is None, "enabled": enabled,
+           "enabling": setting_up, "failed": bool(st.get("start_error")) or setup_failed,
+           "can_set_up": bool(st.get("can_set_up")) and reason == "not_installed"}
     if reason:
         out["reason"] = reason
     if st.get("start_error"):
         out["message"] = st["start_error"]
+    elif setup_failed and setup.get("message"):
+        out["message"] = str(setup["message"])[:300]
     return out
+
+
+async def _setup(py, home: Path) -> tuple[int, dict]:
+    """One tap from the app: install (needs password-free sudo) and start, in a
+    detached helper. The app polls GET until `enabled` (or `failed`)."""
+    if _setup_state(home).get("state") == "running":
+        return 200, _public(await _status(py, home), _setup_state(home))
+    proc, line = await _helper(py, home, {"op": "setup"}, wait_line=30)
+    if line != "started":
+        if proc.returncode is None:
+            proc.terminate()
+        code = line.split(" ", 1)[1] if line.startswith("error ") else "screen_error"
+        if code == "needs_password":
+            return _err(409, "needs_password",
+                        "Setting up the screen needs your password on that computer.")
+        if code in ("hermes_too_old", "unsupported_os"):
+            return 200, _public({"error": code} if code == "hermes_too_old" else {"supported": False})
+        return _err(502, "screen_error", "Couldn't start setting up the screen. Try again.")
+    # It keeps going on its own (own session); reap it when it ends.
+    asyncio.get_running_loop().create_task(proc.wait())
+    logger.info("screen setup started")
+    return 200, _public(await _status(py, home), _setup_state(home))
+
+
+def argv_of(hermes: str | list | tuple | None) -> list[str]:
+    """Hermes' interpreter as an argv prefix: a plain path (an older Hermes in a
+    venv) or the launcher-derived command (tunnel_cli._hermes_command)."""
+    if not hermes:
+        return []
+    return [hermes] if isinstance(hermes, str) else [str(x) for x in hermes]
 
 
 def _reap(key: str) -> list:
@@ -132,7 +201,7 @@ def _reap(key: str) -> list:
 
 async def handle(method: str, path: str, headers: dict, body, *, hermes_url: str,
                  relay_url: str, device_token: str, hermes_home: Path,
-                 hermes_python: str) -> tuple[int, dict]:
+                 hermes_python) -> tuple[int, dict]:
     m = _ROUTE.match((path or "").split("?", 1)[0])
     if m is None:
         return _err(404, "not_found", "Not found.")
@@ -149,11 +218,13 @@ async def handle(method: str, path: str, headers: dict, body, *, hermes_url: str
     method = (method or "GET").upper()
 
     if method == "GET" and not m.group("rest"):
-        return 200, _public(await _status(hermes_python, home))
+        return 200, _public(await _status(hermes_python, home), _setup_state(home))
     if method != "POST":
         return _err(405, "method_not_allowed", "Method not allowed.")
-    if m.group("rest"):                      # enable = start; installing needs sudo and is the agent's job
+    if m.group("rest") == "/enable":         # enable = start; never installs
         return 200, _public(await _status(hermes_python, home, start=True))
+    if m.group("rest") == "/setup":
+        return await _setup(hermes_python, home)
 
     if isinstance(body, str):
         try:

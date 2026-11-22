@@ -345,16 +345,16 @@ class HeraldRelayClient:
                 # (herald#490). See agent_info.py.
                 return await agent_info.handle(
                     method, path, headers or {}, body, hermes_url=self.local_hermes_url,
-                    hermes_home=tunnel_cli.HERMES_HOME, hermes_python=tunnel_cli._hermes_python())
+                    hermes_home=tunnel_cli.HERMES_HOME, hermes_python=tunnel_cli._hermes_command())
             if local_passwords.matches(path):
                 return await local_passwords.handle(
                     method, path, headers or {}, body, hermes_url=self.local_hermes_url,
-                    hermes_home=tunnel_cli.HERMES_HOME, hermes_python=tunnel_cli._hermes_python())
+                    hermes_home=tunnel_cli.HERMES_HOME, hermes_python=tunnel_cli._hermes_command())
             return await local_screen.handle(
                 method, path, headers or {}, body,
                 hermes_url=self.local_hermes_url, relay_url=self.relay_url,
                 device_token=self.device_token, hermes_home=tunnel_cli.HERMES_HOME,
-                hermes_python=tunnel_cli._hermes_python())
+                hermes_python=tunnel_cli._hermes_command())
         except Exception as exc:  # noqa: BLE001
             logger.warning("app request failed: %s", type(exc).__name__)
             return 502, {"error": "screen_error", "message": "That didn't work. Try again."}
