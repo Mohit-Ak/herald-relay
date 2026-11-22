@@ -49,3 +49,15 @@ Mobile App  ←→  Herald Cloud  ←(WebSocket)→  hermes-herald plugin  ←�
 3. The plugin proxies it to your local Hermes API and streams the response back.
 4. When Hermes fires an `approval_required` or completes a long task, the plugin
    sends a push trigger so Herald Cloud wakes your phone.
+
+## Agent name and skills on stock Hermes
+
+Herald reads the agent's name from `GET /api/soul` and its skills from
+`GET /v1/skills`. Stock Hermes does not serve the first (404), and its
+`/v1/skills` currently fails (500). The tunnel answers both paths itself, for
+the default profile and `/p/<profile>/…`, whenever local Hermes can't: it asks
+Hermes first and passes a working answer through untouched, otherwise it
+checks the caller holds that profile's key and builds the same answer with
+Hermes' own loaders (`agent_info_helper.py`, run with Hermes' interpreter),
+falling back to reading `SOUL.md` and `skills/**/SKILL.md`. Nothing needs to
+be patched into Hermes, so `hermes update` no longer breaks either.
