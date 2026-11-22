@@ -46,6 +46,9 @@ class FakeCollection:
     def document(self, doc_id):
         return FakeDocRef(self._docs, doc_id)
 
+    def stream(self):
+        return [FakeDoc(d) for d in list(self._docs.values())]
+
 
 class FakeDB:
     def __init__(self):

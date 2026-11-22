@@ -37,6 +37,38 @@ Hermes works normally; Herald notifies you on mobile when it needs you or finish
 
 - `HERALD_DEVICE_TOKEN` — fallback if `device_token` not in config
 - `HERALD_LOCAL_HERMES_URL` — override local Hermes URL (default: `http://localhost:8642`)
+- `HERALD_BRIDGE_AUTO_UPDATE=0` — turn automatic updates off (or `herald.auto_update: false`
+  in `~/.hermes/config.yaml`). Also refuses "update now" from the app.
+
+## Automatic updates (0.8.0+)
+
+`herald-tunnel run` keeps Herald Bridge up to date by itself (`herald_relay/bridge_update.py`):
+
+1. On start, every 6 h (± 30 min jitter), when the relay hints a newer release on connect,
+   and when the app or an operator asks ("update now"), it fetches
+   `GET <relay>/relay/plugin/manifest`: a DSSE envelope signed offline with Ed25519
+   (`scripts/release_plugin.py`; the public key is compiled into the plugin). Expired
+   manifests and versions not newer than the running one are refused.
+2. Machines in the release's `rollout_percent` slice (stable per machine) download the wheel
+   (size-capped, sha256-checked) and install it into a NEW venv,
+   `~/.herald-relay-versions/<version>`, which must pass `herald-tunnel selfcheck`.
+3. When nothing has been in flight for 20 s (no run, no forwarded request, no approval), the
+   stable path `~/.herald-relay` is flipped to the new venv with one `rename(2)` and the
+   tunnel re-execs itself. systemd, the keepalive and skills keep using `~/.herald-relay`.
+4. The new version is on probation until it registers with the relay. If it crash-loops
+   (3 starts) or cannot register while the relay is reachable, `~/.herald-relay` is flipped
+   back, the version is marked bad and the previous build restarts.
+
+Only a venv Herald owns is touched: `~/.herald-relay`, `~/.herald/venv` (Herald Cloud), or
+`HERALD_BRIDGE_ROOT`. `herald-tunnel update` asks for an update now;
+`herald-tunnel update --status` shows the last result. Machines on 0.7.x and older have no
+updater: they need one manual `pip install -U` to reach 0.8.0.
+
+Releasing: `python scripts/release_plugin.py --rollout 10` (builds, attaches the wheel to
+GitHub release `plugin-v<version>`, signs with Secret Manager `herald-relay-signing-key`,
+writes `backend/release/plugin-manifest.json`), merge that file, then
+`--resign --rollout 100` when the first slice is healthy. The relay counts machines per
+version at `GET /relay/plugin/versions` (header `X-Herald-Ops-Token`).
 
 ## Architecture
 

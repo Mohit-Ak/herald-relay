@@ -16,6 +16,7 @@ on:
       - 'backend/**'
       - 'plugin/**'
       - 'tests/**'
+      - 'scripts/**'
       - 'infra/Dockerfile'
       - '.github/workflows/relay-deploy.yml'
 

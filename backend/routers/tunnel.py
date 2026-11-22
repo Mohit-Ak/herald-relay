@@ -293,6 +293,8 @@ class TunnelConnectRequest(BaseModel):
     device_token: str
     agent_card: dict          # AgentCard JSON
     hermes_version: str = "unknown"
+    # Herald Bridge (hermes-herald) version, sent by 0.8.0+ (herald#505).
+    plugin_version: Optional[str] = None
 
 
 class TunnelUpdateRequest(BaseModel):
@@ -540,19 +542,31 @@ async def tunnel_connect(req: TunnelConnectRequest):
     """
     _require_device(req.device_token)
 
+    from routers import plugin_release  # noqa: PLC0415
+
     db = get_db()
-    db.collection("devices").document(req.device_token).update(
-        {
-            "agent_card": req.agent_card,
-            "hermes_version": req.hermes_version,
-            "last_seen": time.time(),
-        }
-    )
+    fields = {
+        "agent_card": req.agent_card,
+        "hermes_version": req.hermes_version,
+        "last_seen": time.time(),
+    }
+    plugin_version = (req.plugin_version or "").strip()[:32]
+    if plugin_version:
+        # Version telemetry: GET /relay/plugin/versions counts these.
+        fields["plugin_version"] = plugin_version
+        fields["plugin_version_at"] = fields["last_seen"]
+    db.collection("devices").document(req.device_token).update(fields)
     logger.info(
         f"[tunnel/connect] device={req.device_token[:8]}... "
-        f"hermes_version={req.hermes_version}"
+        f"hermes_version={req.hermes_version} plugin_version={plugin_version or '-'}"
     )
-    return {"ok": True, "tunnel_url": "/tunnel/events"}
+    out: dict = {"ok": True, "tunnel_url": "/tunnel/events"}
+    # Tells a 0.8.0+ machine a newer release exists, so it checks now instead
+    # of at its next 6-hourly check. A hint: it still verifies the signature.
+    h = plugin_release.hint()
+    if h:
+        out["plugin"] = h
+    return out
 
 
 # ---------------------------------------------------------------------------

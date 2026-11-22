@@ -21,7 +21,7 @@ import os
 import re
 import time
 import uuid
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional
 
 import httpx
 
@@ -114,6 +114,13 @@ class HeraldRelayClient:
         # stream, from its ``hello`` frame (None on relays that predate it).
         self._stream_instance: Optional[str] = None
 
+        # Herald Bridge self-update (bridge_update.BridgeUpdater), set by
+        # `herald-tunnel run`. None elsewhere (dev runner, Hermes plugin).
+        self.updater: Optional[Any] = None
+        # Forwarded phone requests in flight; an update only restarts the
+        # tunnel when this, runs and approvals are all zero (see busy()).
+        self._inflight_forwards = 0
+
         # Long-lived client for everything that is NOT the tunnel stream:
         # registration, forwarded requests and their replies, run updates.
         # It must outlive a stream reconnect — otherwise every reconnect
@@ -157,6 +164,12 @@ class HeraldRelayClient:
 
     def set_agent_card(self, card: dict) -> None:
         self._agent_card = card
+
+    def busy(self) -> bool:
+        """Is anything in flight that a tunnel restart would cut off?"""
+        edge = getattr(self, "_edge", None)
+        return bool(self._run_tasks or self._approval_queues or self._inflight_forwards
+                    or (edge is not None and getattr(edge, "inflight", 0)))
 
     async def run_forever(self) -> None:
         """Main loop: connect to SSE tunnel, handle tasks, reconnect on drop."""
@@ -335,11 +348,24 @@ class HeraldRelayClient:
             # down to this machine's Hermes. Handle out-of-band so a slow
             # request never stalls the event stream.
             asyncio.create_task(self._handle_forward_request(client, task_payload))
+        elif ptype == "bridge_update":
+            # The relay says "check for a Herald Bridge update now" (an
+            # operator action, or the app hit a too-old feature). Only a
+            # trigger: the signed manifest still decides what is installed.
+            if self.updater is not None:
+                state = self.updater.request_now(force=bool(task_payload.get("force", True)))
+                logger.info("Update-now from the relay: %s", state.get("state"))
 
     async def screen_request(self, method: str, path: str, headers: dict, body) -> tuple[int, dict]:
         """The app's screen calls, on either transport (see local_screen.py)."""
-        from herald_relay import agent_info, local_passwords, local_screen, tunnel_cli  # noqa: PLC0415
+        from herald_relay import (  # noqa: PLC0415
+            agent_info, local_bridge, local_passwords, local_screen, tunnel_cli,
+        )
         try:
+            if local_bridge.matches(path):
+                return await local_bridge.handle(
+                    method, path, headers or {}, body, hermes_url=self.local_hermes_url,
+                    updater=self.updater)
             if agent_info.matches(path):
                 # Agent name + skills: answered here when stock Hermes can't
                 # (herald#490). See agent_info.py.
@@ -418,8 +444,17 @@ class HeraldRelayClient:
 
         url = f"{self.local_hermes_url}{path}"
 
-        from herald_relay import agent_info, local_passwords, local_screen  # noqa: PLC0415
-        if local_screen.matches(path) or local_passwords.matches(path) or agent_info.matches(path):
+        self._inflight_forwards += 1
+        try:
+            await self._forward_one(client, request_id, method, path, url, body,
+                                    wants_stream, forwarded)
+        finally:
+            self._inflight_forwards -= 1
+
+    async def _forward_one(self, client, request_id, method, path, url, body,
+                           wants_stream, forwarded) -> None:
+        from herald_relay import is_local_door  # noqa: PLC0415
+        if is_local_door(path):
             # Answered here, not by Hermes: the app asking to see this
             # computer's Bot Screen (see local_screen.py).
             status, answer = await self.screen_request(method, path, forwarded, body)
@@ -518,17 +553,27 @@ class HeraldRelayClient:
 
     async def _register(self, client: httpx.AsyncClient) -> None:
         url = f"{self.relay_url}/tunnel/connect"
+        from herald_relay.bridge_update import current_version  # noqa: PLC0415
         payload = {
             "device_token": self.device_token,
             "agent_card": self._agent_card,
             "hermes_version": self.hermes_version,
+            # Version telemetry (herald#505): the relay counts machines per
+            # Herald Bridge version. Older relays ignore the field.
+            "plugin_version": current_version(),
         }
         resp = await client.post(url, json=payload)
         if resp.status_code not in (200, 201):
             raise RuntimeError(
                 f"Tunnel connect failed {resp.status_code}: {resp.text[:200]}"
             )
-        logger.info("Tunnel registered: %s", resp.json())
+        try:
+            reply = resp.json()
+        except ValueError:
+            reply = {}
+        logger.info("Tunnel registered: %s", reply)
+        if self.updater is not None:
+            self.updater.on_registered(reply if isinstance(reply, dict) else {})
 
     async def _flush_pending_approvals(self, client: httpx.AsyncClient) -> None:
         """
