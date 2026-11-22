@@ -256,7 +256,16 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
 def _self_exec() -> str:
     """Absolute ExecStart for systemd: the installed console script if it
-    exists (survives shell PATH differences), else `python -m`."""
+    exists (survives shell PATH differences), else `python -m`.
+
+    After a self-update this process runs from a versioned venv
+    (~/.herald-relay-versions/0.8.0); the unit, keepalive and skills must
+    still name the STABLE path (~/.herald-relay), or the next update's swap
+    would not reach them."""
+    from . import bridge_update  # noqa: PLC0415
+    layout = bridge_update.Layout.detect()
+    if layout is not None and layout.bin.exists():
+        return str(layout.bin)
     candidate = Path(sys.executable).parent / "herald-tunnel"
     if candidate.exists():
         return str(candidate)
@@ -283,19 +292,96 @@ def cmd_run(args: argparse.Namespace) -> int:
         logger.info("a tunnel is already running for this machine; not starting another")
         return 0
 
-    logger.info("starting tunnel relay=%s local_hermes=%s api_key=%s",
-                relay_url, local_hermes, "set" if key else "MISSING")
+    from . import bridge_update  # noqa: PLC0415
+    layout = bridge_update.Layout.detect()
+    boot = bridge_update.on_boot(layout)
+    if boot == "rolled_back" and layout is not None:
+        # The version we just swapped in keeps crashing: the previous one is
+        # back in place, so start that instead.
+        lock.close()
+        bridge_update.exec_restart(layout)
+
+    logger.info("starting tunnel relay=%s local_hermes=%s api_key=%s herald_bridge=%s%s",
+                relay_url, local_hermes, "set" if key else "MISSING",
+                bridge_update.current_version(), " (new, on probation)" if boot else "")
     client = HeraldRelayClient(
         relay_url=relay_url,
         device_token=device_token,
         local_hermes_url=local_hermes,
         hermes_key=key,
     )
+    updater = bridge_update.BridgeUpdater(
+        relay_url=relay_url, device_token=device_token, busy=client.busy, cfg=cfg,
+        layout=layout, detect=False, probation=(boot == "probation"))
+    client.updater = updater
+
+    async def _main() -> None:
+        updates = asyncio.create_task(updater.run_forever())
+        try:
+            await client.run_forever()
+        finally:
+            updates.cancel()
+
     try:
-        asyncio.run(client.run_forever())
+        asyncio.run(_main())
     except KeyboardInterrupt:
         pass
     return 0
+
+
+def cmd_selfcheck(args: argparse.Namespace) -> int:
+    """Prove this install can start: every module imports. A staged update
+    must pass this before it replaces the running version."""
+    import importlib  # noqa: PLC0415
+    from . import bridge_update  # noqa: PLC0415
+    for mod in ("relay_client", "edge_tunnel", "local_screen", "local_passwords",
+                "local_bridge", "agent_info", "local_skills", "bridge_update", "plugin"):
+        importlib.import_module(f"herald_relay.{mod}")
+    import cryptography.hazmat.primitives.asymmetric.ed25519  # noqa: F401,PLC0415
+    print(json.dumps({"version": bridge_update.current_version()}))
+    return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """Herald Bridge updates itself every few hours; this asks for it now."""
+    from . import bridge_update  # noqa: PLC0415
+    cfg = _read_yaml_config()
+    if args.status:
+        st = bridge_update.load_state()
+        print(json.dumps({"version": bridge_update.current_version(),
+                          "auto_update": not bridge_update.opted_out(cfg)
+                          and bridge_update.Layout.detect() is not None,
+                          "last_result": st.get("last_result"),
+                          "pending": bool(st.get("pending")),
+                          "bad": st.get("bad", {})}))
+        return 0
+    if bridge_update.opted_out(cfg):
+        print("Automatic updates are turned off on this computer "
+              "(HERALD_BRIDGE_AUTO_UPDATE=0 or herald.auto_update: false).")
+        return 2
+    layout = bridge_update.Layout.detect()
+    if layout is None:
+        print("This Herald Bridge was not installed in its own venv "
+              "(~/.herald-relay), so it can't update itself. Reinstall it "
+              "there, or update it with pip.")
+        return 2
+    if _tunnel_running():
+        # The running tunnel owns the swap (it knows when nothing is in
+        # flight); it picks this request up within half a minute.
+        path = bridge_update.request_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(int(__import__("time").time())))
+        print("Asked the running tunnel to update now. Check with: "
+              "herald-tunnel update --status")
+        return 0
+    relay_url = (cfg.get("relay_url") or DEFAULT_RELAY).rstrip("/")
+    upd = bridge_update.BridgeUpdater(
+        relay_url=relay_url, device_token=cfg.get("device_token", ""), busy=lambda: False,
+        cfg=cfg, layout=layout, detect=False, restart=lambda _l: None)
+    res = asyncio.run(upd.check_and_apply(force=True))
+    print(json.dumps({"result": res, "version": bridge_update.current_version(),
+                      "target": upd.target}))
+    return 0 if res in ("current", "restarting") else 1
 
 
 def cmd_ensure(args: argparse.Namespace) -> int:
@@ -527,6 +613,13 @@ def main() -> int:
 
     p_ensure = sub.add_parser("ensure", help="start the tunnel in the background if it is not running")
     p_ensure.set_defaults(func=cmd_ensure)
+
+    p_self = sub.add_parser("selfcheck", help="prove this install can start (used by updates)")
+    p_self.set_defaults(func=cmd_selfcheck)
+
+    p_upd = sub.add_parser("update", help="update Herald Bridge now (it also does this by itself)")
+    p_upd.add_argument("--status", action="store_true", help="show the last update result")
+    p_upd.set_defaults(func=cmd_update)
 
     p_status = sub.add_parser("status", help="check local Hermes, relay, and tunnel")
     p_status.set_defaults(func=cmd_status)

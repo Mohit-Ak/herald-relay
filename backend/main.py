@@ -16,6 +16,7 @@ load_dotenv()  # Load .env before anything else imports os.environ
 from routers import billing, push, relay  # noqa: E402
 from routers import hermes_proxy  # noqa: E402
 from routers import screen_bridge  # noqa: E402
+from routers import plugin_release  # noqa: E402
 from routers.tunnel import router as tunnel_router, monitor_router  # noqa: E402
 from services.relay_manager import relay_manager  # noqa: E402
 from services.firestore_client import get_db  # noqa: E402
@@ -91,6 +92,7 @@ app.add_middleware(
 # Routers
 # ---------------------------------------------------------------------------
 app.include_router(relay.router, prefix="/relay")
+app.include_router(plugin_release.router, prefix="/relay")
 # Before the proxy: its catch-all owns every other /hermes/d/<token>/ path.
 app.include_router(screen_bridge.router)
 app.include_router(hermes_proxy.router)
