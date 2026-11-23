@@ -118,17 +118,20 @@ def spool(home: Path) -> Path:
 
 
 def _write_private(path: Path, data: bytes, *, exclusive: bool = False) -> None:
-    """0600 file written atomically (tmp + rename), or created exclusively (O_EXCL)."""
-    if exclusive:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        return
+    """0600 file that appears whole: written to a temp name, then renamed into place, or
+    (exclusive) hard-linked into place, which fails if the name exists, so a reader polling
+    for it never sees half a file and only the first writer wins."""
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as f:
         f.write(data)
-    os.replace(tmp, path)
+    if not exclusive:
+        os.replace(tmp, path)
+        return
+    try:
+        os.link(tmp, path)
+    finally:
+        os.unlink(tmp)
 
 
 def identity(home: Path) -> Ed25519PrivateKey:
