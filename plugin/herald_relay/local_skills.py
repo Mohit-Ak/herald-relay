@@ -226,11 +226,20 @@ drawn; containers name their children by id. At most 40 components.
 Types: `Text{text, variant: body|caption}` (text allows **bold**),
 `Column{children}`, `Row{children, justify?}`, `List{children}`,
 `Card{child}`, `Divider{}`, `Icon{name}`,
-`Button{child, variant: primary|default|borderless, action}`. No images.
+`Button{child, variant: primary|default|borderless, action}`.
 A Button's `action` is `{"event": {"name": "...", "context": {}}}`: tapping it
 sends the event name as the user's next message, so make the name the full
 reply in plain words ("Book the 7pm table"). Say state in words ("Done",
 "Running", "Failed"), never with colour alone.
+
+**Pictures** only when the run's instructions include "Herald image rules";
+then follow them exactly. In short: `Image{url, description, variant?, fit?}`
+(`variant`: `icon|avatar|smallFeature|mediumFeature|largeFeature|header`,
+`fit`: `cover|contain`). The `url` is an `https://` image URL you got from a
+tool result (never built, guessed, or carrying the user's data), and
+`description` (what the picture shows) is required. At most 12 per card.
+Never `Video` or `AudioPlayer`: put a link in a `herald-links` block instead.
+Without those rules in the instructions, no images: the app can't show them.
 
 Results list:
 
