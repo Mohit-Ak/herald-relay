@@ -124,7 +124,7 @@ username if you know it. Herald shows the box and tells the user; don't ask
 for the password in chat:
 
 ```
-{{herald_tunnel}} secret request --home "{{hermes_home}}" --kind password --origin "https://example.com" --username "<username or leave out>"
+{{herald_tunnel}} secret request --kind password --origin "https://example.com" --username "<username or leave out>" --home "{{hermes_home}}"
 ```
 
 Run it exactly as written, with a terminal timeout of at least 360 seconds:

@@ -283,7 +283,9 @@ def test_the_skill_tells_the_agent_the_exact_command(tmp_path):
     local_skills.install(tmp_path, command="/opt/h/bin/herald-tunnel", all_profiles=True)
     for home in (tmp_path, tmp_path / "profiles/work"):
         text = (home / "skills/herald/herald-passwords/SKILL.md").read_text()
-        assert f'/opt/h/bin/herald-tunnel secret request --home "{home}" --kind password' in text
+        # Site first: a run stream that shortens long previews still shows Herald the site.
+        assert '/opt/h/bin/herald-tunnel secret request --kind password --origin "https://example.com"' in text
+        assert f'--home "{home}"' in text
         assert "{{" not in text
 
 
