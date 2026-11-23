@@ -32,6 +32,8 @@ logger = logging.getLogger("herald.edge")
 # aiohttp closes the socket if a pong is late, which triggers reconnect.
 PING_INTERVAL_S = 50.0
 BACKOFF_MAX_S = 60.0
+# Largest `chunk` frame for an answer the tunnel builds itself.
+LOCAL_ANSWER_PIECE = 256 * 1024
 # Only these headers reach local Hermes (mirrors the edge's allowlist).
 _FORWARD = ("authorization", "accept", "content-type", "last-event-id")
 
@@ -158,7 +160,11 @@ class EdgeTunnel:
                 status, answer = await self.on_screen(method, path, own, body)
                 await send({"t": "res", "id": rid, "status": status,
                             "headers": {"content-type": "application/json"}})
-                await send({"t": "chunk", "id": rid, "data": json.dumps(answer)})
+                # In pieces: a file answer can be megabytes of base64, and
+                # one socket message must stay small (herald#399).
+                text = json.dumps(answer)
+                for i in range(0, len(text), LOCAL_ANSWER_PIECE) or [0]:
+                    await send({"t": "chunk", "id": rid, "data": text[i:i + LOCAL_ANSWER_PIECE]})
                 await send({"t": "end", "id": rid})
                 return
             async with self._http.request(

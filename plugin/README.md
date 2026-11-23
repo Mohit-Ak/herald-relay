@@ -70,6 +70,26 @@ writes `backend/release/plugin-manifest.json`), merge that file, then
 `--resign --rollout 100` when the first slice is healthy. The relay counts machines per
 version at `GET /relay/plugin/versions` (header `X-Herald-Ops-Token`).
 
+## Files the agent makes (0.9.0+)
+
+When the agent writes `MEDIA:/absolute/path` in a reply, the Herald app shows the file: a
+picture inline, anything else as an attachment to open, save or share. The app fetches it
+from this tunnel (`herald_relay/local_files.py`), never from a public link:
+
+| Request | Answer |
+|---|---|
+| `GET [/p/<profile>]/_herald/file?path=<abs>&info=1` | `{name, size, mime, kind, mtime, max_bytes, chunk_bytes}` |
+| `GET …/_herald/file?path=<abs>&offset=<n>&length=<n>&mtime=<m>` | one piece (≤ 2 MiB) as `{…, offset, b64, eof}` |
+| `GET …/_herald/file?path=<abs>&w=<px>` | a picture shrunk to `w` (≤ 1600), WebP, no EXIF/GPS: `{mime, b64, width, height}` |
+
+- Only the holder of that profile's API key (checked against local Hermes).
+- Only the home folder minus hidden folders, Hermes' own media folders (generated images,
+  screenshots) and the user's own temp files. Credentials by name (`id_rsa`, `*.pem`,
+  `credentials.json`, `.env*`, …) and anything that starts like a private key are refused
+  everywhere. `HERALD_FILE_ROOTS` (os.pathsep list) replaces the home folder.
+- Files over 50 MB (`HERALD_FILE_MAX_MB`) are not sent; the app says how big the file is.
+- Logs carry status and byte counts, never a path.
+
 ## Architecture
 
 ```
