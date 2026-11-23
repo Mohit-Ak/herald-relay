@@ -1,4 +1,4 @@
-# hermes-herald (Herald Bridge)
+# herald-bridge (Herald Bridge)
 
 Connect your local Hermes AI agent to Herald — voice-first conversations on mobile.
 
@@ -7,11 +7,11 @@ Full guide: <https://heraldbridge.dev/docs/setup>.
 ## Install (it keeps itself up to date)
 
 Install into its own venv at `~/.herald-relay`, the only place Herald Bridge can
-update itself. `hermes-herald` is not published on PyPI; install it from GitHub:
+update itself. It is published on PyPI as **herald-bridge**:
 
 ```bash
 python3 -m venv ~/.herald-relay
-~/.herald-relay/bin/pip install "git+https://github.com/Mohit-Ak/herald-relay#subdirectory=plugin"
+~/.herald-relay/bin/pip install -U herald-bridge
 ~/.herald-relay/bin/herald-tunnel setup     # registers this machine, installs the service
 ~/.herald-relay/bin/herald-tunnel status    # local Hermes → relay → this tunnel, end to end
 ```

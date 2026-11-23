@@ -35,7 +35,7 @@ Install it into its own venv at `~/.herald-relay`. That is the only place it can
 
 ```bash
 python3 -m venv ~/.herald-relay
-~/.herald-relay/bin/pip install "git+https://github.com/Mohit-Ak/herald-relay#subdirectory=plugin"
+~/.herald-relay/bin/pip install -U herald-bridge
 ~/.herald-relay/bin/herald-tunnel setup
 ```
 
@@ -44,7 +44,7 @@ python3 -m venv ~/.herald-relay
 Then restart the Hermes gateway once so it serves the new key, and run the installer again (`bash install.sh`). It now prints **Relay paired** and a QR code that also works away from your Wi-Fi.
 
 :::note Installed it somewhere else?
-If Herald Bridge was installed with `pip install` into Hermes' own venv or with `pip --user`, `herald-tunnel setup` and the running tunnel move it into `~/.herald-relay` by themselves. Your device token and settings stay as they are, and from then on it updates itself. Developer checkouts (`pip install -e`) are never moved. `hermes-herald` is not on PyPI: install it from GitHub as shown above.
+If Herald Bridge was installed with `pip install` into Hermes' own venv or with `pip --user`, `herald-tunnel setup` and the running tunnel move it into `~/.herald-relay` by themselves. Your device token and settings stay as they are, and from then on it updates itself. Developer checkouts (`pip install -e`) are never moved. The PyPI name is `herald-bridge` (`hermes-herald` on PyPI is a placeholder for the old name).
 :::
 
 ---
