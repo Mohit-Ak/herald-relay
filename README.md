@@ -88,12 +88,12 @@ curl https://herald-api.eventhorizonlabs.xyz/health
 ### Install Hermes plugin
 
 One command set on any Linux machine running a Hermes `api_server`. Install into
-`~/.herald-relay`, the only place Herald Bridge updates itself (`hermes-herald` is
-not on PyPI):
+`~/.herald-relay`, the only place Herald Bridge updates itself (PyPI name:
+`herald-bridge`):
 
 ```bash
 python3 -m venv ~/.herald-relay
-~/.herald-relay/bin/pip install "git+https://github.com/Mohit-Ak/herald-relay#subdirectory=plugin"
+~/.herald-relay/bin/pip install -U herald-bridge      # PyPI: https://pypi.org/project/herald-bridge/
 ~/.herald-relay/bin/herald-tunnel setup    # registers this device, writes ~/.hermes config,
                                            # installs + starts a systemd user unit
 ~/.herald-relay/bin/herald-tunnel status   # proves local Hermes → relay → tunnel end to end

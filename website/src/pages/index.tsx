@@ -193,7 +193,7 @@ export default function Home(): JSX.Element {
                 Get started free →
               </a>
               <a
-                href="https://github.com/nousresearch/hermes-herald"
+                href="https://github.com/Mohit-Ak/herald-relay"
                 target="_blank"
                 rel="noopener noreferrer"
                 style={{
@@ -217,7 +217,7 @@ export default function Home(): JSX.Element {
             <div style={{ maxWidth: 560, margin: '0 auto' }}>
               <TerminalBlock lines={[
                 'python3 -m venv ~/.herald-relay',
-                '~/.herald-relay/bin/pip install "git+https://github.com/Mohit-Ak/herald-relay#subdirectory=plugin"',
+                '~/.herald-relay/bin/pip install -U herald-bridge',
                 '~/.herald-relay/bin/herald-tunnel setup',
               ]} />
             </div>
@@ -445,7 +445,7 @@ export default function Home(): JSX.Element {
                 {
                   n: 1,
                   title: 'Install Herald Bridge (it keeps itself up to date)',
-                  code: ['python3 -m venv ~/.herald-relay', '~/.herald-relay/bin/pip install "git+https://github.com/Mohit-Ak/herald-relay#subdirectory=plugin"', '~/.herald-relay/bin/herald-tunnel setup'],
+                  code: ['python3 -m venv ~/.herald-relay', '~/.herald-relay/bin/pip install -U herald-bridge', '~/.herald-relay/bin/herald-tunnel setup'],
                 },
                 {
                   n: 2,
@@ -520,7 +520,7 @@ export default function Home(): JSX.Element {
             <div style={{ display: 'flex', gap: 24 }}>
               {[
                 { label: 'Docs', href: '/docs/quickstart' },
-                { label: 'GitHub', href: 'https://github.com/nousresearch/hermes-herald' },
+                { label: 'GitHub', href: 'https://github.com/Mohit-Ak/herald-relay' },
                 { label: 'Discord', href: 'https://discord.gg/nousresearch' },
               ].map((link) => (
                 <a
