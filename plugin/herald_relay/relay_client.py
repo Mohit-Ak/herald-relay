@@ -117,6 +117,9 @@ class HeraldRelayClient:
         # Herald Bridge self-update (bridge_update.BridgeUpdater), set by
         # `herald-tunnel run`. None elsewhere (dev runner, Hermes plugin).
         self.updater: Optional[Any] = None
+        # Herald Bridge keeps Hermes updated (hermes_update.HermesUpdater),
+        # set by `herald-tunnel run`; its status rides on every connect.
+        self.hermes_updater: Optional[Any] = None
         # Forwarded phone requests in flight; an update only restarts the
         # tunnel when this, runs and approvals are all zero (see busy()).
         self._inflight_forwards = 0
@@ -348,6 +351,12 @@ class HeraldRelayClient:
             # down to this machine's Hermes. Handle out-of-band so a slow
             # request never stalls the event stream.
             asyncio.create_task(self._handle_forward_request(client, task_payload))
+        elif ptype == "hermes_update":
+            # Ops: "check Hermes now" (skips the rollout slice, never the
+            # safety checks). The signed manifest still names the version.
+            if self.hermes_updater is not None:
+                state = self.hermes_updater.request_now()
+                logger.info("Hermes update-now from the relay: %s", state.get("state"))
         elif ptype == "bridge_update":
             # The relay says "check for a Herald Bridge update now" (an
             # operator action, or the app hit a too-old feature). Only a
@@ -562,6 +571,13 @@ class HeraldRelayClient:
             # Herald Bridge version. Older relays ignore the field.
             "plugin_version": current_version(),
         }
+        if self.hermes_updater is not None:
+            # Fleet view of Hermes versions and why a box isn't updating
+            # (carried patches, opted out, ...). Older relays ignore it.
+            try:
+                payload["hermes_update"] = self.hermes_updater.status()
+            except Exception:  # noqa: BLE001
+                pass
         resp = await client.post(url, json=payload)
         if resp.status_code not in (200, 201):
             raise RuntimeError(

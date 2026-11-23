@@ -65,10 +65,15 @@ def target_layout(home: Optional[Path] = None) -> bu.Layout:
 
 def is_source_checkout() -> bool:
     """A developer's editable install or a bare checkout: never moved."""
-    try:
-        from importlib.metadata import distribution  # noqa: PLC0415
-        dist = distribution(bu.PACKAGE)
-    except Exception:  # noqa: BLE001  (PackageNotFoundError: a bare checkout)
+    from importlib.metadata import distribution  # noqa: PLC0415
+    dist = None
+    for name in bu.PACKAGES:  # hermes-herald, or herald-bridge after the rename
+        try:
+            dist = distribution(name)
+            break
+        except Exception:  # noqa: BLE001  (PackageNotFoundError)
+            continue
+    if dist is None:  # a bare checkout
         return True
     try:
         info = json.loads(dist.read_text("direct_url.json") or "{}")

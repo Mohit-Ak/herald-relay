@@ -295,6 +295,9 @@ class TunnelConnectRequest(BaseModel):
     hermes_version: str = "unknown"
     # Herald Bridge (hermes-herald) version, sent by 0.8.0+ (herald#505).
     plugin_version: Optional[str] = None
+    # Herald Bridge keeps Hermes updated (0.9.0+): Hermes version, target and
+    # why a box isn't updating. Stored trimmed for GET /relay/plugin/versions.
+    hermes_update: Optional[dict] = None
 
 
 class TunnelUpdateRequest(BaseModel):
@@ -555,6 +558,9 @@ async def tunnel_connect(req: TunnelConnectRequest):
         # Version telemetry: GET /relay/plugin/versions counts these.
         fields["plugin_version"] = plugin_version
         fields["plugin_version_at"] = fields["last_seen"]
+    hu = plugin_release.clean_hermes_update(req.hermes_update)
+    if hu:
+        fields["hermes_update"] = hu
     db.collection("devices").document(req.device_token).update(fields)
     logger.info(
         f"[tunnel/connect] device={req.device_token[:8]}... "

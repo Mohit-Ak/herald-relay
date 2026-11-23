@@ -122,6 +122,52 @@ def test_signed_but_invalid_fields_refused(over):
     assert e.value.code == "bad_manifest"
 
 
+# ── distribution rename: hermes-herald -> herald-bridge ─────────────────────
+
+@pytest.mark.parametrize("pkg,wheel", [
+    ("hermes-herald", "hermes_herald"),
+    ("herald-bridge", "herald_bridge"),
+])
+def test_both_distribution_names_accepted(pkg, wheel):
+    m = manifest(package=pkg, wheel_name=f"{wheel}-{NEW}-py3-none-any.whl",
+                 wheel_url=f"https://github.com/x/y/releases/download/v/{wheel}-{NEW}-py3-none-any.whl")
+    got = bu.verify_envelope(sign(m), keys=KEYS)
+    assert (got["package"], got["version"]) == (pkg, NEW)
+
+
+@pytest.mark.parametrize("pkg,wheel", [
+    ("hermes-herald", "herald_bridge"),  # wheel must match its manifest package
+    ("herald-bridge", "hermes_herald"),
+    ("herald_bridge", "herald_bridge"),  # package is the normalized dist name only
+    ("herald-bridge", "herald_bridge_evil"),
+])
+def test_mismatched_or_unknown_names_refused(pkg, wheel):
+    with pytest.raises(bu.UpdateError) as e:
+        bu.verify_envelope(sign(manifest(package=pkg, wheel_name=f"{wheel}-{NEW}-py3-none-any.whl")),
+                           keys=KEYS)
+    assert e.value.code == "bad_manifest"
+
+
+def test_releases_still_built_as_hermes_herald():
+    # 0.8.x bridges only accept hermes-herald: the build must not switch until
+    # a release carrying PACKAGES (this one) is at 100%.
+    assert bu.PACKAGE == "hermes-herald"
+    assert set(bu.PACKAGES) == {"hermes-herald", "herald-bridge"}
+    text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    assert 'name = "hermes-herald"' in text
+
+
+def test_current_version_found_under_either_name(monkeypatch):
+    import importlib.metadata as md
+
+    def fake(name):
+        if name == "herald-bridge":
+            return "1.2.3"
+        raise md.PackageNotFoundError(name)
+    monkeypatch.setattr(md, "version", fake)
+    assert bu.current_version() == "1.2.3"
+
+
 def test_compiled_in_key_is_real():
     k = base64.b64decode(next(iter(bu.TRUSTED_KEYS.values())))
     assert len(k) == 32

@@ -59,6 +59,11 @@ from typing import Awaitable, Callable, Optional
 logger = logging.getLogger("herald.update")
 
 PACKAGE = "hermes-herald"
+# Distribution names this updater accepts. The project is being renamed to
+# ``herald-bridge``: every installed bridge must accept BOTH names before any
+# release is built under the new one, or machines refuse that update.
+# PACKAGE stays the name releases are built under until the switch.
+PACKAGES: tuple[str, ...] = ("hermes-herald", "herald-bridge")
 PAYLOAD_TYPE = "application/vnd.herald.bridge-manifest+json"
 MANIFEST_PATH = "/relay/plugin/manifest"
 
@@ -81,7 +86,7 @@ MAX_WHEEL_BYTES = 20 * 1024 * 1024
 INSTALL_TIMEOUT_S = 900
 REQUEST_POLL_S = 30.0
 
-_WHEEL_NAME = re.compile(r"^hermes_herald-(\d+(?:\.\d+){1,3})-py3-none-any\.whl$")
+_WHEEL_NAME = re.compile(r"^(hermes_herald|herald_bridge)-(\d+(?:\.\d+){1,3})-py3-none-any\.whl$")
 _VERSION = re.compile(r"^\d+(?:\.\d+){1,3}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{7,40}$")
@@ -98,12 +103,14 @@ class UpdateError(Exception):
 # ── versions ─────────────────────────────────────────────────────────────────
 
 def current_version() -> str:
-    try:
-        from importlib.metadata import version  # noqa: PLC0415
-        return version(PACKAGE)
-    except Exception:  # noqa: BLE001  (not installed: a source checkout)
-        from herald_relay import __version__  # noqa: PLC0415
-        return __version__
+    from importlib.metadata import version  # noqa: PLC0415
+    for name in PACKAGES:  # hermes-herald, or herald-bridge after the rename
+        try:
+            return version(name)
+        except Exception:  # noqa: BLE001  (PackageNotFoundError: try the other name)
+            continue
+    from herald_relay import __version__  # noqa: PLC0415  (a source checkout)
+    return __version__
 
 
 def vtuple(v: str) -> tuple[int, ...]:
@@ -197,14 +204,16 @@ def verify_envelope(envelope: dict, *, keys: Optional[dict[str, str]] = None,
 def _check_manifest(m: dict, *, now: float) -> None:
     if not isinstance(m, dict):
         raise UpdateError("bad_manifest", "not an object")
-    if m.get("package") != PACKAGE:
+    if m.get("package") not in PACKAGES:
         raise UpdateError("bad_manifest", "package")
     v = m.get("version")
     if not isinstance(v, str) or not _VERSION.match(v):
         raise UpdateError("bad_manifest", "version")
     name = m.get("wheel_name")
     wm = _WHEEL_NAME.match(name) if isinstance(name, str) else None
-    if not wm or wm.group(1) != v:
+    # The wheel must be the manifest's own distribution, at its version.
+    if (not wm or wm.group(2) != v
+            or wm.group(1) != str(m["package"]).replace("-", "_")):
         raise UpdateError("bad_manifest", "wheel_name")
     url = m.get("wheel_url")
     if not isinstance(url, str) or not url.startswith("https://"):
