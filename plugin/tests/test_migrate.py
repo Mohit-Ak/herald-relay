@@ -74,6 +74,32 @@ def test_editable_dev_install_counts_as_source_checkout():
     assert migrate.is_source_checkout() is True
 
 
+def test_installed_under_new_name_is_not_a_bare_checkout(monkeypatch):
+    # After the rename to herald-bridge, an installed wheel must still be seen
+    # as an install (and moved), not as a bare checkout.
+    import importlib.metadata as md
+
+    import herald_relay
+    site = Path(herald_relay.__file__).resolve().parents[1]
+
+    class Dist:  # a regular (non-editable) wheel install under the new name
+        def read_text(self, _name):
+            return "{}"
+
+        def locate_file(self, _p):
+            return site
+    seen = []
+
+    def fake(name):
+        seen.append(name)
+        if name == "herald-bridge":
+            return Dist()
+        raise md.PackageNotFoundError(name)
+    monkeypatch.setattr(md, "distribution", fake)
+    assert migrate.is_source_checkout() is False
+    assert seen == ["hermes-herald", "herald-bridge"]
+
+
 # ── install the owned copy ───────────────────────────────────────────────────
 
 def test_installs_the_signed_release_and_links_root(tmp_path):

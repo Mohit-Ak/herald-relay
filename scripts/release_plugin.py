@@ -83,10 +83,21 @@ def _version() -> str:
     return m.group(1)
 
 
+def _package() -> str:
+    """Distribution name from plugin/pyproject.toml. It must be one the
+    INSTALLED bridges accept: switch to herald-bridge only once a release
+    whose bridge_update.PACKAGES includes it (0.9.0) is at 100%."""
+    text = (REPO / "plugin" / "pyproject.toml").read_text()
+    m = re.search(r'^name\s*=\s*"([^"]+)"', text, re.M)
+    if not m or m.group(1) not in bridge_update.PACKAGES:
+        raise SystemExit(f"plugin/pyproject.toml name must be one of {bridge_update.PACKAGES}")
+    return m.group(1)
+
+
 def build_wheel(out_dir: Path) -> Path:
     subprocess.run(["uv", "build", "--wheel", "--out-dir", str(out_dir), str(REPO / "plugin")],
                    check=True)
-    wheels = sorted(out_dir.glob("hermes_herald-*-py3-none-any.whl"))
+    wheels = sorted(out_dir.glob(f"{_package().replace('-', '_')}-*-py3-none-any.whl"))
     if len(wheels) != 1:
         raise SystemExit(f"expected one wheel, got {wheels}")
     return wheels[0]
@@ -188,7 +199,7 @@ def main() -> int:
                     .get("min_supported", prev_min)
             except (ValueError, KeyError):
                 pass
-        m = {"package": bridge_update.PACKAGE, "version": version, "wheel_name": wheel.name,
+        m = {"package": _package(), "version": version, "wheel_name": wheel.name,
              "wheel_url": url, "sha256": digest, "git_sha": sha, "git_ref": tag,
              "min_supported": args.min_supported or prev_min,
              "rollout_percent": args.rollout, "released_at": now, "signed_at": now,
