@@ -1,0 +1,138 @@
+name: PyPI publish
+
+# Publishes to PyPI with Trusted Publishing (GitHub OIDC, no API token).
+# PyPI trusts exactly this file + environment `pypi` for the projects
+# `herald-bridge` and `hermes-herald` (account eventhorizonlabs).
+#
+#   herald-bridge  Herald Bridge, built from plugin/. The source keeps the
+#                  distribution name `hermes-herald` (installed 0.8.x bridges'
+#                  self-updater only accepts that name); the name is switched
+#                  to `herald-bridge` here, at build time, for PyPI only.
+#                  Release: push tag `pypi-v<version>` (must equal
+#                  plugin/pyproject.toml), or run this workflow by hand.
+#   hermes-herald  The 0.0.1 placeholder in packaging/hermes-herald-placeholder
+#                  that holds the old name. Manual run only.
+#
+# Never publish Herald Bridge below 0.9.0 to PyPI: a fresh
+# `pip install herald-bridge` of an 0.8.x build gets an updater that rejects
+# every later update (it only knows the name hermes-herald). The build fails
+# closed on that.
+#
+# Pull requests only build and check (no publish).
+
+on:
+  push:
+    tags:
+      - 'pypi-v*'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'plugin/**'
+      - 'packaging/**'
+      - '.github/workflows/pypi-publish.yml'
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'What to publish'
+        type: choice
+        options:
+          - herald-bridge
+          - hermes-herald-placeholder
+        default: herald-bridge
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      package: ${{ steps.pick.outputs.package }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Pick package
+        id: pick
+        env:
+          INPUT: ${{ inputs.package }}
+        run: |
+          pkg="${INPUT:-herald-bridge}"
+          echo "package=$pkg" >> "$GITHUB_OUTPUT"
+          echo "Building $pkg"
+      - name: Build herald-bridge
+        if: steps.pick.outputs.package == 'herald-bridge'
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python -m pip install --upgrade pip build twine packaging
+          version=$(python -c "import tomllib;print(tomllib.load(open('plugin/pyproject.toml','rb'))['project']['version'])")
+          echo "plugin version: $version"
+          if [ "$EVENT" = "push" ] && [ "$REF_NAME" != "pypi-v$version" ]; then
+            echo "::error::tag $REF_NAME does not match plugin version $version"; exit 1
+          fi
+          if [ "$EVENT" != "pull_request" ]; then
+            python - "$version" <<'EOF'
+          import sys
+          from packaging.version import Version
+          if Version(sys.argv[1]) < Version("0.9.0"):
+              sys.exit(f"::error::refusing to publish herald-bridge {sys.argv[1]}: "
+                       "the self-updater accepts the herald-bridge name from 0.9.0 on")
+          EOF
+            grep -q 'herald.bridge' plugin/herald_relay/bridge_update.py || {
+              echo "::error::bridge_update.py does not accept the herald-bridge name"; exit 1; }
+          fi
+          # Rename the distribution for PyPI. Import package (herald_relay),
+          # entry points and the herald-tunnel command stay the same.
+          sed -i 's/^name = "hermes-herald"$/name = "herald-bridge"/' plugin/pyproject.toml
+          grep -q '^name = "herald-bridge"$' plugin/pyproject.toml
+          python -m build plugin -o dist
+          ls dist
+          test -f "dist/herald_bridge-$version-py3-none-any.whl"
+          test -f "dist/herald_bridge-$version.tar.gz"
+      - name: Build hermes-herald placeholder
+        if: steps.pick.outputs.package == 'hermes-herald-placeholder'
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build packaging/hermes-herald-placeholder -o dist
+          ls dist
+      - name: Check
+        run: |
+          python -m twine check --strict dist/*
+          python -m venv /tmp/t
+          /tmp/t/bin/pip install dist/*.whl
+          if [ "${{ steps.pick.outputs.package }}" = "herald-bridge" ]; then
+            /tmp/t/bin/herald-tunnel --help >/dev/null
+            /tmp/t/bin/python -c "import importlib.metadata as m; assert m.distribution('herald-bridge')"
+          else
+            if /tmp/t/bin/hermes-herald; then echo "placeholder must exit 1"; exit 1; fi
+            if /tmp/t/bin/python -c "import hermes_herald"; then echo "import must fail"; exit 1; fi
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/${{ needs.build.outputs.package == 'herald-bridge' && 'herald-bridge' || 'hermes-herald' }}/
+    permissions:
+      id-token: write  # OIDC token for PyPI Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
