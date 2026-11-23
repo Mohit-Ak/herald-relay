@@ -32,9 +32,11 @@ Opt out (self-hosters who pin versions): ``HERALD_BRIDGE_AUTO_UPDATE=0`` in the
 tunnel's environment, or ``herald.auto_update: false`` in config.yaml. That
 also refuses "update now" from the app.
 
-Only a venv Herald owns is ever touched: ``~/.herald-relay`` (local installs),
-``~/.herald/venv`` (Herald Cloud) or ``HERALD_BRIDGE_ROOT``. A developer
-checkout or a package installed into Hermes' own venv is left alone.
+Only a venv Herald owns is ever updated: ``~/.herald-relay`` (local installs),
+``~/.herald/venv`` (Herald Cloud) or ``HERALD_BRIDGE_ROOT``. A bridge installed
+anywhere else (Hermes' own venv, ``pip --user``) first moves itself into
+``~/.herald-relay`` and updates from there (migrate.py); the old copy is left
+as it was. A developer checkout is never moved or updated.
 """
 from __future__ import annotations
 
@@ -487,7 +489,12 @@ class BridgeUpdater:
                  download: Optional[Callable[[dict], Awaitable[Path]]] = None,
                  stager: Callable[..., Path] = stage,
                  relay_reachable: Optional[Callable[[], Awaitable[bool]]] = None,
-                 keys: Optional[dict[str, str]] = None, detect: bool = True):
+                 keys: Optional[dict[str, str]] = None, detect: bool = True,
+                 migration: Optional[bool] = None, migration_reason: str = "",
+                 move_to: Optional[Layout] = None,
+                 hermes_home: Optional[Path] = None,
+                 reexec: Optional[Callable[[Path, list], None]] = None,
+                 repoint: Optional[Callable[..., list]] = None):
         self.relay_url = relay_url.rstrip("/")
         self.device_token = device_token
         self.busy = busy
@@ -512,13 +519,27 @@ class BridgeUpdater:
         # The relay hints the latest release on every (re)connect, and streams
         # are recycled every few minutes: act on each hinted version once.
         self._hinted: Optional[str] = None
+        # A bridge running from a venv Herald doesn't own (Hermes' venv,
+        # pip --user, ~/herald-tunnel-venv) moves itself into ~/.herald-relay
+        # first, then updates like any other machine (migrate.py).
+        self.hermes_home = Path(hermes_home or os.getenv("HERMES_HOME", Path.home() / ".hermes"))
+        if self.layout is None and migration is None:
+            from . import migrate  # noqa: PLC0415
+            migration, migration_reason = migrate.eligibility(self.cfg, managed=False)
+        self.migration = bool(migration) and self.layout is None
+        self.migration_reason = migration_reason or ("" if self.migration else "not_managed")
+        self._move_to = move_to
+        self._reexec = reexec
+        self._repoint = repoint
 
     # -- what the app and the relay see ---------------------------------------
 
     def availability(self) -> tuple[bool, str]:
         if opted_out(self.cfg):
             return False, "disabled"
-        if self.layout is None:
+        if self.layout is None and not self.migration:
+            # Not owned and can't move (a developer checkout, a second
+            # tunnel for another HERMES_HOME, HERALD_BRIDGE_MIGRATE=0).
             return False, "not_managed"
         return True, ""
 
@@ -532,6 +553,11 @@ class BridgeUpdater:
             "target": self.target,
             "error": self.error,
             "last_check": self.last_check,
+            # Where this copy runs from, so ops can tell an owned install
+            # from one that still has to move (or can't, and why).
+            "managed": self.layout is not None,
+            "move": (None if self.layout is not None
+                     else ("pending" if self.migration else self.migration_reason)),
         }
 
     def request_now(self, *, force: bool = True) -> dict:
@@ -605,11 +631,60 @@ class BridgeUpdater:
                 self._wake.clear()
                 force, self._force = self._force, False
                 if self.availability()[0] and not self.probation:
-                    await self.check_and_apply(force=force)
+                    if self.layout is None:
+                        await self.migrate_now()
+                    else:
+                        await self.check_and_apply(force=force)
                 deadline = time.monotonic() + CHECK_EVERY_S + random.uniform(-JITTER_S, JITTER_S)
         finally:
             if watchdog:
                 watchdog.cancel()
+
+    async def migrate_now(self) -> str:
+        """Move this bridge into ~/.herald-relay and re-exec from there (see
+        migrate.py). Returns a short result code (also kept in ``state``)."""
+        from . import migrate  # noqa: PLC0415
+        if self._running_apply:
+            return "busy"
+        self._running_apply = True
+        self.error = None
+        target = self._move_to or migrate.target_layout()
+        try:
+            self.state = "moving"
+            version = await migrate.prepare(
+                target, fetch=self._fetch,
+                download=lambda m: download_wheel(target, m),
+                stager=self._stager, keys=self._keys)
+            self.target = version
+            self.state = "waiting_idle"
+            await self.wait_idle()
+            self.state = "restarting"
+            changed = (self._repoint or migrate.repoint_launchers)(
+                target.root, hermes_home=self.hermes_home, unit=migrate.current_unit())
+            migrate.record(self.hermes_home, {"from": migrate.from_where(),
+                                              "to": str(target.root), "version": version,
+                                              "changed": changed, "result": "moved"})
+            # The new copy checks for a newer release right away (an
+            # "update now" from the app is waiting for an answer).
+            req = self.hermes_home / "herald" / "bridge-update.request"
+            req.parent.mkdir(parents=True, exist_ok=True)
+            req.write_text(str(int(time.time())))
+            logger.info("Herald Bridge moved into %s (%s); restarting from there",
+                        target.root, ", ".join(changed) or "no launcher to change")
+            (self._reexec or migrate.reexec)(target.root, ["run"])
+            return "moved"
+        except UpdateError as e:
+            self.state, self.error = "failed", f"move:{e.code}"
+            self._record(f"move_failed:{e.code}")
+            logger.warning("Herald Bridge could not move into %s: %s", target.root, e)
+            return e.code
+        except Exception as e:  # noqa: BLE001
+            self.state, self.error = "failed", f"move:{type(e).__name__}"
+            self._record(f"move_failed:{type(e).__name__}")
+            logger.warning("Herald Bridge could not move into %s: %r", target.root, e)
+            return "error"
+        finally:
+            self._running_apply = False
 
     def _take_request_file(self) -> bool:
         p = request_path() if self.state_file is None else self.state_file.with_name(
@@ -724,21 +799,7 @@ class BridgeUpdater:
     # -- network ----------------------------------------------------------------
 
     async def _fetch_manifest(self) -> dict:
-        import httpx  # noqa: PLC0415
-        async with httpx.AsyncClient(timeout=20.0) as c:
-            r = await c.get(self.relay_url + MANIFEST_PATH)
-        if r.status_code == 404:
-            raise UpdateError("no_release")
-        if r.status_code != 200:
-            raise UpdateError("manifest_http", str(r.status_code))
-        try:
-            body = r.json()
-        except ValueError as e:
-            raise UpdateError("bad_manifest", "json") from e
-        env = body.get("envelope") if isinstance(body, dict) and "envelope" in body else body
-        if not isinstance(env, dict):
-            raise UpdateError("bad_manifest", "not an object")
-        return env
+        return await fetch_manifest(self.relay_url)
 
     async def _probe_relay(self) -> bool:
         import httpx  # noqa: PLC0415
@@ -749,34 +810,59 @@ class BridgeUpdater:
             return False
 
     async def _download_wheel(self, m: dict) -> Path:
-        import httpx  # noqa: PLC0415
         assert self.layout is not None
-        cache = self.layout.versions / ".cache"
-        cache.mkdir(parents=True, exist_ok=True)
-        dest = cache / m["wheel_name"]
-        if dest.exists() and _sha256(dest) == m["sha256"]:
-            return dest
-        tmp = cache / (m["wheel_name"] + ".part")
-        h, n = hashlib.sha256(), 0
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=15.0),
-                                     follow_redirects=True) as c:
-            async with c.stream("GET", m["wheel_url"]) as r:
-                if r.status_code != 200:
-                    raise UpdateError("download_http", str(r.status_code))
-                with open(tmp, "wb") as f:
-                    async for chunk in r.aiter_bytes():
-                        n += len(chunk)
-                        if n > MAX_WHEEL_BYTES:
-                            f.close()
-                            tmp.unlink(missing_ok=True)
-                            raise UpdateError("download_too_big")
-                        h.update(chunk)
-                        f.write(chunk)
-        if h.hexdigest() != m["sha256"]:
-            tmp.unlink(missing_ok=True)
-            raise UpdateError("hash_mismatch")
-        os.replace(tmp, dest)
+        return await download_wheel(self.layout, m)
+
+
+async def fetch_manifest(relay_url: str) -> dict:
+    """The signed envelope from ``<relay>/relay/plugin/manifest`` (unverified)."""
+    import httpx  # noqa: PLC0415
+    async with httpx.AsyncClient(timeout=20.0) as c:
+        r = await c.get(relay_url.rstrip("/") + MANIFEST_PATH)
+    if r.status_code == 404:
+        raise UpdateError("no_release")
+    if r.status_code != 200:
+        raise UpdateError("manifest_http", str(r.status_code))
+    try:
+        body = r.json()
+    except ValueError as e:
+        raise UpdateError("bad_manifest", "json") from e
+    env = body.get("envelope") if isinstance(body, dict) and "envelope" in body else body
+    if not isinstance(env, dict):
+        raise UpdateError("bad_manifest", "not an object")
+    return env
+
+
+async def download_wheel(layout: Layout, m: dict) -> Path:
+    """Download the release wheel into ``<versions>/.cache`` (size-capped,
+    sha256-checked against the verified manifest)."""
+    import httpx  # noqa: PLC0415
+    cache = layout.versions / ".cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    dest = cache / m["wheel_name"]
+    if dest.exists() and _sha256(dest) == m["sha256"]:
         return dest
+    tmp = cache / (m["wheel_name"] + ".part")
+    h, n = hashlib.sha256(), 0
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=15.0),
+                                 follow_redirects=True) as c:
+        async with c.stream("GET", m["wheel_url"]) as r:
+            if r.status_code != 200:
+                raise UpdateError("download_http", str(r.status_code))
+            with open(tmp, "wb") as f:
+                async for chunk in r.aiter_bytes():
+                    n += len(chunk)
+                    if n > MAX_WHEEL_BYTES:
+                        f.close()
+                        tmp.unlink(missing_ok=True)
+                        raise UpdateError("download_too_big")
+                    h.update(chunk)
+                    f.write(chunk)
+    if h.hexdigest() != m["sha256"]:
+        tmp.unlink(missing_ok=True)
+        raise UpdateError("hash_mismatch")
+    os.replace(tmp, dest)
+    return dest
 
 
 def _sha256(p: Path) -> str:

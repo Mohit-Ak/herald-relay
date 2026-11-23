@@ -216,8 +216,9 @@ export default function Home(): JSX.Element {
             </div>
             <div style={{ maxWidth: 560, margin: '0 auto' }}>
               <TerminalBlock lines={[
-                'pip install hermes-herald',
-                'hermes config set herald.device_token YOUR_TOKEN',
+                'python3 -m venv ~/.herald-relay',
+                '~/.herald-relay/bin/pip install "git+https://github.com/Mohit-Ak/herald-relay#subdirectory=plugin"',
+                '~/.herald-relay/bin/herald-tunnel setup',
               ]} />
             </div>
           </Section>
@@ -239,13 +240,13 @@ export default function Home(): JSX.Element {
                   step: '01',
                   icon: '🔌',
                   title: 'Install the plugin',
-                  body: 'Run pip install hermes-herald and drop two lines into your Hermes config. The plugin connects outbound to the Herald relay — no inbound firewall rules, no VPN.',
+                  body: 'Install Herald Bridge into ~/.herald-relay and run herald-tunnel setup. It keeps itself up to date. The plugin connects outbound to the Herald relay — no inbound firewall rules, no VPN.',
                 },
                 {
                   step: '02',
                   icon: '📱',
                   title: 'Scan your QR code',
-                  body: 'Open the Herald mobile app, tap "Link Device", and scan the QR shown by hermes herald qr. Your phone is now a registered push target — tokens stay on your device.',
+                  body: 'Open the Herald mobile app, tap "Link Device", and scan the QR printed by the heraldbridge.dev installer. Your phone is now a registered push target — tokens stay on your device.',
                 },
                 {
                   step: '03',
@@ -443,25 +444,18 @@ export default function Home(): JSX.Element {
               {[
                 {
                   n: 1,
-                  title: 'Install the plugin',
-                  code: ['pip install hermes-herald'],
+                  title: 'Install Herald Bridge (it keeps itself up to date)',
+                  code: ['python3 -m venv ~/.herald-relay', '~/.herald-relay/bin/pip install "git+https://github.com/Mohit-Ak/herald-relay#subdirectory=plugin"', '~/.herald-relay/bin/herald-tunnel setup'],
                 },
                 {
                   n: 2,
-                  title: 'Add to your Hermes config (~/.hermes/config.yaml)',
-                  code: [
-                    'plugins:',
-                    '  herald-relay:',
-                    '    enabled: true',
-                    '    device_token: YOUR_TOKEN   # from Herald app',
-                    '    mode: credits              # or byok',
-                    '    # gemini_api_key: AIza...  # if using byok mode',
-                  ],
+                  title: 'Pair your phone (heraldbridge.dev installer prints the QR)',
+                  code: ['curl -fsSL https://heraldbridge.dev/install.sh -o install.sh', 'bash install.sh'],
                 },
                 {
                   n: 3,
                   title: 'Verify the connection',
-                  code: ['hermes plugins list'],
+                  code: ['~/.herald-relay/bin/herald-tunnel status'],
                 },
                 {
                   n: 4,
