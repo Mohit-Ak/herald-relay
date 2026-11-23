@@ -103,14 +103,27 @@ class UpdateError(Exception):
 # ── versions ─────────────────────────────────────────────────────────────────
 
 def current_version() -> str:
+    """Version of the code that is running.
+
+    Normally exactly one of PACKAGES is installed. A venv can hold both when
+    `pip install herald-bridge` lands on top of an older `hermes-herald` (or the
+    reverse): pip overwrites the shared herald_relay files but keeps both
+    metadata records. Trusting the first name found then reports the stale
+    version (seen: 0.8.1 reported while 0.9.0 ran), so the fleet view is wrong
+    and the updater reinstalls a release it already runs. With more than one
+    record, the package's own __version__ (the files actually imported) wins.
+    """
     from importlib.metadata import version  # noqa: PLC0415
+    from herald_relay import __version__  # noqa: PLC0415
+    found = []
     for name in PACKAGES:  # hermes-herald, or herald-bridge after the rename
         try:
-            return version(name)
+            found.append(version(name))
         except Exception:  # noqa: BLE001  (PackageNotFoundError: try the other name)
             continue
-    from herald_relay import __version__  # noqa: PLC0415  (a source checkout)
-    return __version__
+    if len(found) == 1:
+        return found[0]
+    return __version__  # none (a source checkout) or both (mixed install)
 
 
 def vtuple(v: str) -> tuple[int, ...]:
