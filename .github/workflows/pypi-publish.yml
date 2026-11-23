@@ -86,7 +86,7 @@ jobs:
               sys.exit(f"::error::refusing to publish herald-bridge {sys.argv[1]}: "
                        "the self-updater accepts the herald-bridge name from 0.9.0 on")
           EOF
-            grep -q 'herald.bridge' plugin/herald_relay/bridge_update.py || {
+            grep -Eq '"herald-bridge"|herald_bridge-' plugin/herald_relay/bridge_update.py || {
               echo "::error::bridge_update.py does not accept the herald-bridge name"; exit 1; }
           fi
           # Rename the distribution for PyPI. Import package (herald_relay),
