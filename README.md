@@ -87,14 +87,20 @@ curl https://herald-api.eventhorizonlabs.xyz/health
 
 ### Install Hermes plugin
 
-One command on any Linux machine running a Hermes `api_server`:
+One command set on any Linux machine running a Hermes `api_server`. Install into
+`~/.herald-relay`, the only place Herald Bridge updates itself (`hermes-herald` is
+not on PyPI):
 
 ```bash
-pip install hermes-herald
-herald-tunnel setup        # registers this device, writes ~/.hermes config,
-                           # installs + starts a systemd user unit
-herald-tunnel status       # proves local Hermes → relay → tunnel end to end
+python3 -m venv ~/.herald-relay
+~/.herald-relay/bin/pip install "git+https://github.com/Mohit-Ak/herald-relay#subdirectory=plugin"
+~/.herald-relay/bin/herald-tunnel setup    # registers this device, writes ~/.hermes config,
+                                           # installs + starts a systemd user unit
+~/.herald-relay/bin/herald-tunnel status   # proves local Hermes → relay → tunnel end to end
 ```
+
+A bridge installed anywhere else (Hermes' venv, `pip --user`) moves itself into
+`~/.herald-relay` on `setup` or on its next start (`plugin/herald_relay/migrate.py`).
 
 `setup` is idempotent — re-running keeps the existing device token (pass
 `--new-token` to rotate it), so a reinstall never orphans a token that a
