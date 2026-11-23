@@ -1,5 +1,5 @@
 """Herald Relay plugin for Hermes — connects your local Hermes to Herald Cloud."""
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 
 
 def is_local_door(path: str) -> bool:

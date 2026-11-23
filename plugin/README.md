@@ -91,6 +91,39 @@ writes `backend/release/plugin-manifest.json`), merge that file, then
 `--resign --rollout 100` when the first slice is healthy. The relay counts machines per
 version at `GET /relay/plugin/versions` (header `X-Herald-Ops-Token`).
 
+## Herald Bridge keeps Hermes updated (0.9.0+)
+
+Hermes has no automatic update. `herald-tunnel run` updates it, but only to the Hermes
+release Herald tested, and only where that's safe (`herald_relay/hermes_update.py`):
+
+- **Signed pin.** The same signed manifest may carry
+  `"hermes": {"version", "tag", "git_sha", "rollout_percent"}`, set with
+  `release_plugin.py --resign --hermes-tag vX.Y.Z --hermes-rollout 10`. No block means
+  nothing happens. A new tag starts at 0 %.
+- **Safe boxes only.** The box must be an official source checkout run by a `hermes-gateway*`
+  systemd user unit, with a clean tree and **no local commits**. Carried patches are skipped and
+  reported, never clobbered. Herald Cloud (image-managed), forks and opted-out boxes are skipped.
+- **Never past the tested release, never backwards.** The upstream tag must be the signed commit
+  and the box must be strictly behind it. If upstream already shipped a newer stable release,
+  wait, because `hermes update` would go there.
+- **Staged, then idle.** The release is compiled in a throwaway git worktree. It is applied only
+  after the gateway has reported no active agent, API run or delegation (`/health/detailed`)
+  for 2 minutes.
+- **Hermes installs it.** `hermes update --yes --channel stable --no-gateway-restart` handles
+  dependencies, config migrations and the downgrade guard. We check it landed on the signed
+  commit.
+- **Restart, health, rollback.** The `hermes-gateway*` units are restarted through the user's
+  systemd. Checks: local `/health` must report the new version and `/v1/models` must answer with
+  the key. Through the relay, `/health`, `/api/soul` and `/v1/skills` must answer. On any failure
+  the checkout goes back to the previous commit, the gateway restarts and is re-checked, and the
+  version is marked bad on that box. A failed rollback halts updates there (`rollback_failed`)
+  until an operator looks.
+- **Opt out:** `HERALD_HERMES_AUTO_UPDATE=0` or `herald.hermes_auto_update: false`.
+- **Fleet view:** every connect reports `hermes_update` (current, target, state, why skipped).
+  `GET /relay/plugin/versions` counts Hermes versions and skip reasons.
+  `POST /relay/plugin/update-now {"device_token": …, "hermes": true}` checks one box now
+  (skips the rollout slice, never the safety checks).
+
 ## Architecture
 
 ```

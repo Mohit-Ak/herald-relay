@@ -361,13 +361,22 @@ def cmd_run(args: argparse.Namespace) -> int:
                     "; it moves itself into ~/.herald-relay once the tunnel is idle"
                     if updater.migration else f" ({updater.migration_reason})")
     client.updater = updater
+    from . import hermes_update  # noqa: PLC0415
+    hermes_updater = hermes_update.HermesUpdater(
+        relay_url=relay_url, device_token=device_token, api_key=key,
+        hermes_home=HERMES_HOME, cfg=cfg, busy=client.busy, local_url=local_hermes,
+        # Herald Cloud machines get Hermes from their image (cloud-ops).
+        cloud=layout is not None and layout.root == Path.home() / ".herald" / "venv")
+    client.hermes_updater = hermes_updater
 
     async def _main() -> None:
         updates = asyncio.create_task(updater.run_forever())
+        hermes_updates = asyncio.create_task(hermes_updater.run_forever())
         try:
             await client.run_forever()
         finally:
             updates.cancel()
+            hermes_updates.cancel()
 
     try:
         asyncio.run(_main())
@@ -382,7 +391,8 @@ def cmd_selfcheck(args: argparse.Namespace) -> int:
     import importlib  # noqa: PLC0415
     from . import bridge_update  # noqa: PLC0415
     for mod in ("relay_client", "edge_tunnel", "local_screen", "local_passwords",
-                "local_bridge", "agent_info", "local_skills", "bridge_update", "plugin"):
+                "local_bridge", "agent_info", "local_skills", "bridge_update", "plugin",
+                "migrate", "hermes_update"):
         importlib.import_module(f"herald_relay.{mod}")
     import cryptography.hazmat.primitives.asymmetric.ed25519  # noqa: F401,PLC0415
     print(json.dumps({"version": bridge_update.current_version()}))
@@ -400,7 +410,8 @@ def cmd_update(args: argparse.Namespace) -> int:
                           and bridge_update.Layout.detect() is not None,
                           "last_result": st.get("last_result"),
                           "pending": bool(st.get("pending")),
-                          "bad": st.get("bad", {})}))
+                          "bad": st.get("bad", {}),
+                          "hermes": _hermes_update_summary()}))
         return 0
     if bridge_update.opted_out(cfg):
         print("Automatic updates are turned off on this computer "
@@ -455,6 +466,15 @@ def _move_now(cfg: dict) -> int:
     print(json.dumps({"result": "moved", "version": version, "root": str(target.root),
                       "changed": changed}))
     return 0
+
+
+def _hermes_update_summary() -> dict:
+    """What Herald Bridge last did about Hermes itself (hermes_update.py)."""
+    from . import hermes_update  # noqa: PLC0415
+    hs = hermes_update.load_state(hermes_update.state_path(HERMES_HOME))
+    return {"auto_update": not hermes_update.opted_out(_read_yaml_config()),
+            "last_result": hs.get("last_result"), "pending": bool(hs.get("pending")),
+            "halted": hs.get("halted"), "bad": hs.get("bad", {})}
 
 
 def cmd_ensure(args: argparse.Namespace) -> int:

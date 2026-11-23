@@ -7,6 +7,11 @@
     python scripts/release_plugin.py --rollout 10
     # 2. later, widen it (re-signs the same release, no rebuild):
     python scripts/release_plugin.py --resign --rollout 100
+    # 3. Herald tested a Hermes release: offer it to 10% of boxes (no rebuild),
+    #    then widen. The block rides along on every later release.
+    python scripts/release_plugin.py --resign --hermes-tag v0.23.3 --hermes-rollout 10
+    python scripts/release_plugin.py --resign --hermes-rollout 100
+    python scripts/release_plugin.py --resign --hermes-off      # stop offering one
 
 Both write backend/release/plugin-manifest.json. Commit it in a PR; the relay
 serves it at GET /relay/plugin/manifest once deployed. Nothing reaches a
@@ -87,6 +92,44 @@ def build_wheel(out_dir: Path) -> Path:
     return wheels[0]
 
 
+HERMES_REPO = "https://github.com/NousResearch/hermes-agent"
+
+
+def resolve_hermes_tag(tag: str) -> str:
+    """The commit an upstream stable release tag points at (peeled)."""
+    from herald_relay import hermes_update  # noqa: PLC0415
+    if not hermes_update._STABLE_TAG.match(tag):
+        raise SystemExit(f"{tag!r} is not a stable release tag (vX.Y.Z)")
+    out = subprocess.run(["git", "ls-remote", HERMES_REPO, f"refs/tags/{tag}",
+                          f"refs/tags/{tag}^{{}}"], check=True, capture_output=True,
+                         text=True).stdout.split()
+    refs = dict(zip(out[1::2], out[0::2]))
+    sha = refs.get(f"refs/tags/{tag}^{{}}") or refs.get(f"refs/tags/{tag}")
+    if not sha:
+        raise SystemExit(f"{tag} not found in {HERMES_REPO}")
+    return sha
+
+
+def hermes_block(prev: dict | None, args) -> dict | None:
+    """The Hermes release Herald tested (hermes_update.py), carried forward
+    from the previous manifest unless changed here."""
+    if args.hermes_off:
+        return None
+    h = dict(prev or {})
+    if args.hermes_tag:
+        h = {"tag": args.hermes_tag, "version": args.hermes_tag[1:],
+             "git_sha": resolve_hermes_tag(args.hermes_tag),
+             "rollout_percent": h.get("rollout_percent", 0) if h.get("tag") == args.hermes_tag
+             else 0, "tested_at": int(time.time())}
+    if not h:
+        return None
+    if args.hermes_rollout is not None:
+        if not 0 <= args.hermes_rollout <= 100:
+            raise SystemExit("--hermes-rollout must be 0..100")
+        h["rollout_percent"] = args.hermes_rollout
+    return h
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     p.add_argument("--rollout", type=int, default=10, help="percent of machines (0-100)")
@@ -97,11 +140,24 @@ def main() -> int:
     p.add_argument("--no-upload", action="store_true",
                    help="build + sign only; do not create the GitHub release")
     p.add_argument("--key-file", default="", help="PEM key file instead of Secret Manager")
+    p.add_argument("--hermes-tag", default="",
+                   help="Hermes stable release Herald tested (vX.Y.Z); boxes update to it")
+    p.add_argument("--hermes-rollout", type=int, default=None,
+                   help="percent of boxes offered that Hermes release (default: keep / 0)")
+    p.add_argument("--hermes-off", action="store_true",
+                   help="stop offering a Hermes release")
     args = p.parse_args()
     if not 0 <= args.rollout <= 100:
         raise SystemExit("--rollout must be 0..100")
     now = int(time.time())
 
+    prev_hermes = None
+    if OUT.exists():
+        try:
+            prev_hermes = json.loads(base64.b64decode(json.loads(OUT.read_text())["payload"])) \
+                .get("hermes")
+        except (ValueError, KeyError):
+            pass
     if args.resign:
         old = json.loads(OUT.read_text())
         m = json.loads(base64.b64decode(old["payload"]))
@@ -138,13 +194,25 @@ def main() -> int:
              "rollout_percent": args.rollout, "released_at": now, "signed_at": now,
              "expires": now + EXPIRES_DAYS * 86400}
 
+    h = hermes_block(prev_hermes, args)
+    if h:
+        m["hermes"] = h
+    else:
+        m.pop("hermes", None)
+
     env = sign_envelope(m, _key(args))
     # Prove the plugin will accept it before anything is written.
     got = bridge_update.verify_envelope(env)
+    from herald_relay import hermes_update  # noqa: PLC0415
+    pin = hermes_update.pin_from(got)
+    if h and pin is None:
+        raise SystemExit("the hermes block does not validate; nothing written")
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(env, indent=1) + "\n")
     print(f"wrote {OUT.relative_to(REPO)}: {got['version']} to {got['rollout_percent']}% "
           f"(sha256 {got['sha256'][:12]}…, expires in {EXPIRES_DAYS} days)")
+    if pin:
+        print(f"  Hermes {pin['tag']} ({pin['git_sha'][:12]}) to {pin['rollout_percent']}% of boxes")
     return 0
 
 
