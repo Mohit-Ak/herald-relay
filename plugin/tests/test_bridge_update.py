@@ -168,6 +168,30 @@ def test_current_version_found_under_either_name(monkeypatch):
     assert bu.current_version() == "1.2.3"
 
 
+def test_current_version_mixed_install_reports_running_code(monkeypatch):
+    """Both names installed (pip install herald-bridge over hermes-herald):
+    report the code that runs, not the stale metadata record."""
+    import importlib.metadata as md
+    import herald_relay
+
+    versions = {"hermes-herald": "0.8.1", "herald-bridge": herald_relay.__version__}
+    monkeypatch.setattr(md, "version", lambda name: versions[name])
+    assert bu.current_version() == herald_relay.__version__
+
+    versions = {"hermes-herald": herald_relay.__version__, "herald-bridge": "0.8.9"}
+    assert bu.current_version() == herald_relay.__version__
+
+
+def test_current_version_source_checkout(monkeypatch):
+    import importlib.metadata as md
+    import herald_relay
+
+    def missing(name):
+        raise md.PackageNotFoundError(name)
+    monkeypatch.setattr(md, "version", missing)
+    assert bu.current_version() == herald_relay.__version__
+
+
 def test_compiled_in_key_is_real():
     k = base64.b64decode(next(iter(bu.TRUSTED_KEYS.values())))
     assert len(k) == 32
