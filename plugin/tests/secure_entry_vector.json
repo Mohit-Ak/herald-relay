@@ -1,0 +1,25 @@
+{
+ "comment": "herald#398 secure entry interop vector; regenerate only with a protocol version bump. The same file is flutter/test/fixtures/secure_entry_vector.json in the herald repo.",
+ "request": {
+  "v": 1,
+  "id": "0123456789abcdef0123456789abcdef",
+  "kind": "password",
+  "origin": "https://accounts.example.com",
+  "username": "ann@example.com",
+  "label": "Example Ünïcode",
+  "created_at": 1795000000,
+  "expires_at": 1795000300,
+  "pk": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw",
+  "bridge_key": "5_FioQvsVZr-oZXk3OhLaVaNXSywlj60RsBoXisX8vA",
+  "sig": "NKQaYY-TDFrC1wgplD7SyLT9iCQEobkBdIK0BLXIcjH8R5XmwHYX2UxtH5WU0kPHVbkylYGwY085ODQsmCTQDQ"
+ },
+ "recipient_sk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+ "ephemeral_sk": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2A",
+ "plaintext": "{\"secret\":\"KNOWN_SECRET_7f3a\",\"username\":\"ann@example.com\",\"save\":true}",
+ "answer": {
+  "epk": "ZLEBsdC-WocEvQePmJUAH8A-jp-VIvGI3RKNmEbUhGY",
+  "nonce": "ZGVmZ2hpamtsbW5v",
+  "ct": "eX5mi-hJBE3vExbM9uYKZhw4arBHClMIVOpOudQrKd1UZwYYP2vInokhwUbEkFC35jlf0n_Zor0vhGgOlfXNRDYLQQhqYAuWYJXropi_V_RR1gzFd-wy"
+ },
+ "transcript_b64": "aGVyYWxkLXNlY3VyZS1lbnRyeS92MQowMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZgpwYXNzd29yZAphSFIwY0hNNkx5OWhZMk52ZFc1MGN5NWxlR0Z0Y0d4bExtTnZiUQpZVzV1UUdWNFlXMXdiR1V1WTI5dApSWGhoYlhCc1pTRERuRzdEcjJOdlpHVQoxNzk1MDAwMDAwCjE3OTUwMDAzMDAKQjZOOHZCUWdrOGkzVmR3YkVPaHN0Q1kzU3RGcXFGUHRDOV9Bc3JodEhIdw"
+}

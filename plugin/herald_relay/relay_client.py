@@ -29,6 +29,7 @@ from .event_classifier import (
     EventClassifier, DONE, QUESTION, MILESTONE, IGNORE,
 )
 from .push_triggers import PushTriggerPolicy
+from . import secure_entry
 
 logger = logging.getLogger(__name__)
 
@@ -389,6 +390,10 @@ class HeraldRelayClient:
                 return await agent_info.handle(
                     method, path, headers or {}, body, hermes_url=self.local_hermes_url,
                     hermes_home=tunnel_cli.HERMES_HOME, hermes_python=tunnel_cli._hermes_command())
+            if secure_entry.matches(path):
+                return await secure_entry.handle(
+                    method, path, headers or {}, body, hermes_url=self.local_hermes_url,
+                    hermes_home=tunnel_cli.HERMES_HOME)
             if local_passwords.matches(path):
                 return await local_passwords.handle(
                     method, path, headers or {}, body, hermes_url=self.local_hermes_url,

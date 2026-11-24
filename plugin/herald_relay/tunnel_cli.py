@@ -392,7 +392,7 @@ def cmd_selfcheck(args: argparse.Namespace) -> int:
     from . import bridge_update  # noqa: PLC0415
     for mod in ("relay_client", "edge_tunnel", "local_screen", "local_passwords",
                 "local_bridge", "agent_info", "local_skills", "bridge_update", "plugin",
-                "migrate", "hermes_update"):
+                "migrate", "hermes_update", "secure_entry", "secure_entry_cli"):
         importlib.import_module(f"herald_relay.{mod}")
     import cryptography.hazmat.primitives.asymmetric.ed25519  # noqa: F401,PLC0415
     print(json.dumps({"version": bridge_update.current_version()}))
@@ -727,6 +727,9 @@ def main() -> int:
     p_pw.add_argument("--delete", action="store_true",
                       help="delete the export file afterwards")
     p_pw.set_defaults(func=cmd_passwords)
+
+    from .secure_entry_cli import add_parser as _secret_parser  # noqa: PLC0415
+    _secret_parser(sub)
 
     args = parser.parse_args()
     return args.func(args)

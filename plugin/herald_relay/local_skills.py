@@ -97,8 +97,8 @@ After they hand it back, look at the screen again before carrying on.
 
 PASSWORDS_SKILL = """---
 name: herald-passwords
-description: Sign in to websites with the user's saved Chrome passwords (vault), and import their Chrome password export into the vault.
-version: 1.1.0
+description: Sign in to websites with the user's saved Chrome passwords (vault), ask the user for a missing password in the Herald app, and import their Chrome password export into the vault.
+version: 1.2.0
 author: Herald
 metadata:
   hermes:
@@ -116,6 +116,31 @@ usernames are there, never the passwords.
 2. Type the username yourself, then `browser_vault_fill` with the handle for
    that exact site. Hermes types the password; you never see it.
 3. A code from their phone: `browser_vault_enter_code`.
+
+## A password the vault doesn't have (Herald app)
+
+When you are on a site's sign-in page and `browser_vault_list` has no login
+for that site, ask the user for it on their phone by running this, with the
+site's address (scheme and host, exactly the page you are on) and the
+username if you know it. Herald shows the box and tells the user; don't ask
+for the password in chat:
+
+```
+{{herald_tunnel}} secret request --kind password --origin "https://example.com" --username "<username or leave out>" --home "{{hermes_home}}"
+```
+
+Run it exactly as written, with a terminal timeout of at least 360 seconds:
+it waits while the user types. The Herald app shows a masked box; what they
+type is encrypted on the phone for this computer and goes straight into the
+vault. The command prints a vault `handle` (never the password): type the
+username yourself, then `browser_vault_fill` with that handle. It only fills
+on that exact site.
+
+* `declined`: they chose not to. Don't ask again this turn.
+* `app_not_reached` or `unsupported_kind`: follow the `next` field (ask them to
+  sign in on the screen themselves).
+* One-time codes from a text or email: not through this yet; ask them to
+  sign in on the screen (herald-screen).
 
 ## They use 1Password or Bitwarden
 
@@ -258,7 +283,7 @@ def install(hermes_home: Path, command: str = "herald-tunnel",
             for name, text in SKILLS.items():
                 d = home / "skills" / "herald" / name
                 files = dict(CARDS_REFERENCES) if name == "herald-cards" else {}
-                files["SKILL.md"] = text.replace("{{herald_tunnel}}", command)
+                files["SKILL.md"] = text.replace("{{herald_tunnel}}", command).replace("{{hermes_home}}", str(home))
                 for relative, content in files.items():
                     p = d / relative
                     p.parent.mkdir(parents=True, exist_ok=True)
