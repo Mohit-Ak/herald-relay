@@ -374,7 +374,7 @@ class HeraldRelayClient:
             if local_memory.matches(path):
                 return await local_memory.handle(
                     method, path, headers or {}, body, hermes_url=self.local_hermes_url,
-                    hermes_home=tunnel_cli.HERMES_HOME, hermes_python=tunnel_cli._hermes_python())
+                    hermes_home=tunnel_cli.HERMES_HOME, hermes_python=tunnel_cli._hermes_command())
             if local_bridge.matches(path):
                 return await local_bridge.handle(
                     method, path, headers or {}, body, hermes_url=self.local_hermes_url,

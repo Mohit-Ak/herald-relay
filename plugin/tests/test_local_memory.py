@@ -204,7 +204,7 @@ async def test_both_tunnels_answer_memory_requests(hermes, fake, monkeypatch):
     from herald_relay import edge_tunnel, relay_client, tunnel_cli
 
     monkeypatch.setattr(tunnel_cli, "HERMES_HOME", fake)
-    monkeypatch.setattr(tunnel_cli, "_hermes_python", lambda: sys.executable)
+    monkeypatch.setattr(tunnel_cli, "_hermes_command", lambda: [sys.executable])
     relay = relay_client.HeraldRelayClient("https://relay.example", "tok", hermes)
     path = "/p/work/_herald/memory"
     headers = {"Authorization": "Bearer work-key"}
@@ -237,12 +237,13 @@ async def test_both_tunnels_answer_memory_requests(hermes, fake, monkeypatch):
     assert json.loads(edge_replies[1]["data"]) == relay_replies[0]["body"]
 
 
-def _real_hermes_python():
-    py = Path.home() / ".hermes/hermes-agent/venv/bin/python"
-    return str(py) if py.exists() else None
+def _real_hermes_command():
+    from herald_relay.tunnel_cli import _hermes_command
+
+    return _hermes_command()
 
 
-@pytest.mark.skipif(_real_hermes_python() is None, reason="Hermes not installed here")
+@pytest.mark.skipif(not _real_hermes_command(), reason="Hermes not installed here")
 async def test_against_the_real_hermes_memory_store(hermes, tmp_path):  # noqa: F811
     home = tmp_path / "real"
     (home / "memories").mkdir(parents=True)
@@ -252,7 +253,7 @@ async def test_against_the_real_hermes_memory_store(hermes, tmp_path):  # noqa: 
     async def go(method, body=None):
         return await local_memory.handle(
             method, "/_herald/memory", {"Authorization": "Bearer default-key"}, body,
-            hermes_url=hermes, hermes_home=home, hermes_python=_real_hermes_python() or "")
+            hermes_url=hermes, hermes_home=home, hermes_python=_real_hermes_command())
 
     code, res = await go("GET")
     assert code == 200, res

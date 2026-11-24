@@ -57,12 +57,15 @@ def _err(status: int, code: str, message: str) -> tuple[int, dict]:
     return status, {"error": code, "message": message}
 
 
-async def _run(py: str, home: Path, job: dict, timeout: float) -> dict:
+async def _run(argv: list[str], home: Path, job: dict, timeout: float) -> dict:
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     env["HERMES_HOME"] = str(home)
-    proc = await asyncio.create_subprocess_exec(
-        py, str(_PROG), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL, env=env, cwd=str(home))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, str(_PROG), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL, env=env, cwd=str(home))
+    except OSError:
+        return {"error": "machine_unavailable"}
     try:
         out, _ = await asyncio.wait_for(proc.communicate(json.dumps(job).encode()), timeout)
     except asyncio.TimeoutError:
@@ -83,7 +86,7 @@ def _public(res: dict) -> dict:
 
 
 async def handle(method: str, path: str, headers: dict, body, *, hermes_url: str,
-                 hermes_home: Path, hermes_python: str) -> tuple[int, dict]:
+                 hermes_home: Path, hermes_python) -> tuple[int, dict]:
     m = _ROUTE.match((path or "").split("?", 1)[0])
     if m is None:
         return _err(404, "not_found", "Not found.")
@@ -94,7 +97,8 @@ async def handle(method: str, path: str, headers: dict, body, *, hermes_url: str
     home = local_screen._home(Path(hermes_home), profile)
     if home is None:
         return _err(404, "not_found", "We couldn't find that agent.")
-    if not hermes_python:
+    argv = local_screen.argv_of(hermes_python)
+    if not argv:
         return _err(503, "machine_unavailable", "Hermes on that computer couldn't be found.")
     method = (method or "GET").upper()
 
@@ -128,14 +132,16 @@ async def handle(method: str, path: str, headers: dict, body, *, hermes_url: str
     else:
         return _err(405, "method_not_allowed", "Method not allowed.")
 
-    res = await _run(hermes_python, home, job, TIMEOUT_S)
+    res = await _run(argv, home, job, TIMEOUT_S)
     err = res.get("error")
+    if err == "machine_unavailable":
+        return _err(503, "machine_unavailable", "Hermes on that computer couldn't be found.")
     if err:
         if err in _MESSAGES:
             status, msg = _MESSAGES[err]
             out = {"error": err, "message": msg}
             if err == "changed":       # hand back the fresh list so the app can redraw
-                fresh = await _run(hermes_python, home, {"op": "list"}, TIMEOUT_S)
+                fresh = await _run(argv, home, {"op": "list"}, TIMEOUT_S)
                 if "stores" in fresh:
                     out.update(_public(fresh))
             return status, out
