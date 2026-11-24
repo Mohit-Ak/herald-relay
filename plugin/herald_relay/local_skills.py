@@ -188,7 +188,7 @@ def homes(hermes_home: Path) -> list[Path]:
 
 def install(hermes_home: Path, command: str = "herald-tunnel",
             all_profiles: bool = False) -> list[Path]:
-    """Write the skills; returns the files written. `command` is how to run
+    """Write the skills; returns the SKILL.md entry points. `command` is how to run
     herald-tunnel on this machine. A profile that can't be written is
     skipped, not fatal."""
     written = []
@@ -197,16 +197,16 @@ def install(hermes_home: Path, command: str = "herald-tunnel",
         try:
             for name, text in SKILLS.items():
                 d = home / "skills" / "herald" / name
-                files = {"SKILL.md": text.replace("{{herald_tunnel}}", command)}
-                if name == "herald-cards":
-                    files.update(CARDS_REFERENCES)
+                files = dict(CARDS_REFERENCES) if name == "herald-cards" else {}
+                files["SKILL.md"] = text.replace("{{herald_tunnel}}", command)
                 for relative, content in files.items():
                     p = d / relative
                     p.parent.mkdir(parents=True, exist_ok=True)
                     tmp = p.with_suffix(".md.tmp")
                     tmp.write_text(content, encoding="utf-8")
                     os.replace(tmp, p)
-                    written.append(p)
+                    if relative == "SKILL.md":
+                        written.append(p)
         except OSError:
             if first:
                 raise
