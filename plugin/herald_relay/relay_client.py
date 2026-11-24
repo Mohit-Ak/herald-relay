@@ -368,12 +368,15 @@ class HeraldRelayClient:
     async def screen_request(self, method: str, path: str, headers: dict, body) -> tuple[int, dict]:
         """The app's screen calls, on either transport (see local_screen.py)."""
         from herald_relay import (  # noqa: PLC0415
-            agent_info, local_bridge, local_files, local_passwords, local_screen, tunnel_cli,
+            agent_info, local_bridge, local_files, local_memory, local_passwords, local_screen, tunnel_cli,
         )
         try:
             if local_files.matches(path):
-                # A file the agent made, for the app (herald#399).
                 return await local_files.handle(
+                    method, path, headers or {}, body, hermes_url=self.local_hermes_url,
+                    hermes_home=tunnel_cli.HERMES_HOME, hermes_python=tunnel_cli._hermes_command())
+            if local_memory.matches(path):
+                return await local_memory.handle(
                     method, path, headers or {}, body, hermes_url=self.local_hermes_url,
                     hermes_home=tunnel_cli.HERMES_HOME, hermes_python=tunnel_cli._hermes_command())
             if local_bridge.matches(path):
