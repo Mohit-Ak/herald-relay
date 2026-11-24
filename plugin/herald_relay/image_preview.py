@@ -5,8 +5,8 @@ Used two ways by local_files.py:
 
 * imported, when this tunnel's own Python has Pillow;
 * run as a script with Hermes' interpreter (Pillow is a core Hermes
-  dependency), when it doesn't: one JSON job on stdin
-  ``{"path": "/abs/file", "w": 640}``, one JSON line on stdout
+  dependency), when it doesn't: an ASCII width line followed by the image
+  bytes on stdin, one JSON line on stdout
   ``{"mime", "b64", "width", "height"}`` or ``{"error": code}``.
 
 Only the standard library and Pillow: the script must run under any Hermes.
@@ -99,12 +99,11 @@ def answer(data: bytes, width: int) -> dict:
 
 def _main() -> int:
     try:
-        job = json.loads(sys.stdin.read() or "{}")
-        with open(job["path"], "rb") as f:
-            data = f.read(MAX_SOURCE_BYTES + 1)
+        width = int(sys.stdin.buffer.readline(32).strip())
+        data = sys.stdin.buffer.read(MAX_SOURCE_BYTES + 1)
         if len(data) > MAX_SOURCE_BYTES:
             raise PreviewError("too_large", 413)
-        print(json.dumps(answer(data, int(job.get("w") or 640))), flush=True)
+        print(json.dumps(answer(data, width)), flush=True)
     except PreviewError as e:
         print(json.dumps({"error": e.code, "status": e.status}), flush=True)
     except ImportError:

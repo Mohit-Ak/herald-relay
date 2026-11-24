@@ -172,7 +172,7 @@ def check_path(raw, hermes_home: Path) -> tuple[Path, os.stat_result]:
     for h in homes:
         for sub in _HERMES_MEDIA:
             media = _real(h / sub)
-            if media is not None and _within(real, media) is not None:
+            if media == h / sub and _within(real, media) is not None:
                 return real, st
     # Anything else inside a Hermes home (keys, sessions, config) is never read,
     # even when that home isn't a hidden folder (a container's /opt/data).
@@ -193,14 +193,36 @@ def check_path(raw, hermes_home: Path) -> tuple[Path, os.stat_result]:
     raise Refused(403, "path_not_allowed", "Herald can't open that file.")
 
 
-def _no_private_key(real: Path) -> None:
+def _open_checked(real: Path, expected: os.stat_result):
+    """Pin the authorized file without following a replaced path component."""
     try:
-        with open(real, "rb") as f:
-            head = f.read(8192)
+        directory = os.open(real.anchor, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for part in real.parts[1:-1]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=directory)
+                os.close(directory)
+                directory = child
+            fd = os.open(real.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=directory)
+        finally:
+            os.close(directory)
     except OSError:
         raise Refused(404, "not_found", "That file isn't on the computer any more.") from None
-    if _PRIVATE_KEY.search(head):
-        raise Refused(403, "path_not_allowed", "Herald can't open that file.")
+    try:
+        actual = os.fstat(fd)
+        if not stat.S_ISREG(actual.st_mode) or not os.path.samestat(expected, actual):
+            raise Refused(409, "changed", "That file changed on the computer. Try again.")
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _check_unchanged(file, expected: os.stat_result) -> None:
+    actual = os.fstat(file.fileno())
+    if (actual.st_mtime_ns, actual.st_ctime_ns) != (expected.st_mtime_ns, expected.st_ctime_ns):
+        raise Refused(409, "changed", "That file changed on the computer. Try again.")
 
 
 def _mime_of(real: Path, head: bytes) -> tuple[str, str]:
@@ -226,17 +248,9 @@ def _int(q: dict, key: str, default=None):
         raise Refused(400, "bad_request", "That request isn't right.") from None
 
 
-def _read(real: Path, offset: int, length: int) -> bytes:
-    with open(real, "rb") as f:
-        f.seek(offset)
-        return f.read(length)
-
-
-async def _preview(real: Path, st: os.stat_result, width: int, hermes_python) -> tuple[int, dict]:
-    if st.st_size > image_preview.MAX_SOURCE_BYTES:
+async def _preview(data: bytes, width: int, hermes_python) -> tuple[int, dict]:
+    if len(data) > image_preview.MAX_SOURCE_BYTES:
         return _err(413, "too_large", "That picture is too big to show.")
-    async with _reads:
-        data = await asyncio.to_thread(_read, real, 0, image_preview.MAX_SOURCE_BYTES + 1)
     kind = image_preview.sniff(data[:64])
     if kind is None:
         return _err(415, "not_an_image", "That file isn't a picture.")
@@ -246,7 +260,7 @@ async def _preview(real: Path, st: os.stat_result, width: int, hermes_python) ->
         return _err(e.status, e.code, "Herald can't show that picture.")
     except ImportError:
         pass  # this tunnel's Python has no Pillow: ask Hermes' interpreter
-    ans = await _preview_with_hermes(real, width, hermes_python)
+    ans = await _preview_with_hermes(data, width, hermes_python)
     if ans is not None:
         if "error" in ans:
             if ans.get("error") != "no_pillow":
@@ -254,15 +268,10 @@ async def _preview(real: Path, st: os.stat_result, width: int, hermes_python) ->
                             "Herald can't show that picture.")
         else:
             return 200, ans
-    # Last resort: the picture as it is, when it is small and a type every
-    # phone draws. (It keeps its own metadata; it goes only to its owner.)
-    if len(data) <= image_preview.MAX_OUT_BYTES and kind in ("PNG", "JPEG", "GIF", "WEBP"):
-        return 200, {"mime": _IMAGE_MIMES[kind], "b64": base64.b64encode(data).decode("ascii"),
-                     "width": None, "height": None}
-    return _err(415, "not_an_image", "Herald can't show that picture.")
+    return _err(503, "preview_unavailable", "Herald can't resize that picture on this computer.")
 
 
-async def _preview_with_hermes(real: Path, width: int, hermes_python) -> dict | None:
+async def _preview_with_hermes(data: bytes, width: int, hermes_python) -> dict | None:
     argv = local_screen.argv_of(hermes_python) if hermes_python else []
     if not argv:
         return None
@@ -275,7 +284,7 @@ async def _preview_with_hermes(real: Path, width: int, hermes_python) -> dict | 
         return None
     try:
         out, _ = await asyncio.wait_for(
-            proc.communicate(json.dumps({"path": str(real), "w": width}).encode()), HELPER_TIMEOUT_S)
+            proc.communicate(str(width).encode("ascii") + b"\n" + data), HELPER_TIMEOUT_S)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
@@ -307,38 +316,50 @@ async def handle(method: str, path: str, headers: dict, body, *, hermes_url: str
         return _err(404, "not_found", "We couldn't find that agent.")
     q = parse_qs(query, keep_blank_values=True)
     try:
-        real, st = check_path((q.get("path") or [None])[0], Path(hermes_home))
-        await asyncio.to_thread(_no_private_key, real)
-        width = _int(q, "w")
-        if width is not None:
-            status, ans = await _preview(real, st, width, hermes_python)
-            logger.info("file preview -> %s (%s bytes)", status, len(ans.get("b64") or ""))
-            return status, ans
         async with _reads:
-            head = await asyncio.to_thread(_read, real, 0, 64)
-        mime, kind = _mime_of(real, head)
-        base = {"name": real.name, "size": st.st_size, "mime": mime, "mtime": _mtime(st)}
-        too_big = st.st_size > MAX_FILE_BYTES
-        if (q.get("info") or [""])[0] not in ("", "0"):
-            logger.info("file info -> 200")
-            return 200, {**base, "kind": kind, "max_bytes": MAX_FILE_BYTES,
-                         "chunk_bytes": CHUNK_DEFAULT}
-        if too_big:
-            return _err(413, "too_large", "That file is too big to send to the phone.",
-                        size=st.st_size, max_bytes=MAX_FILE_BYTES)
-        offset = _int(q, "offset", 0)
-        length = _int(q, "length", CHUNK_DEFAULT)
-        if offset < 0 or offset > st.st_size or length <= 0:
-            return _err(400, "bad_request", "That request isn't right.")
-        length = min(length, CHUNK_MAX)
-        want = (q.get("mtime") or [""])[0]
-        if want and want != base["mtime"]:
-            return _err(409, "changed", "That file changed on the computer. Try again.")
-        async with _reads:
-            data = await asyncio.to_thread(_read, real, offset, length)
-        logger.info("file piece -> 200 (%s bytes)", len(data))
-        return 200, {**base, "offset": offset, "b64": base64.b64encode(data).decode("ascii"),
-                     "eof": offset + len(data) >= st.st_size}
+            real, st = await asyncio.to_thread(check_path, (q.get("path") or [None])[0], Path(hermes_home))
+            with _open_checked(real, st) as file:
+                head = await asyncio.to_thread(file.read, 8192)
+                if _PRIVATE_KEY.search(head):
+                    raise Refused(403, "path_not_allowed", "Herald can't open that file.")
+                width = _int(q, "w")
+                if width is not None:
+                    if st.st_size > image_preview.MAX_SOURCE_BYTES:
+                        return _err(413, "too_large", "That picture is too big to show.")
+                    file.seek(0)
+                    data = await asyncio.to_thread(file.read, image_preview.MAX_SOURCE_BYTES + 1)
+                    _check_unchanged(file, st)
+                else:
+                    return await _file_response(file, real, st, head, q)
+        status, answer = await _preview(data, width, hermes_python)
+        logger.info("file preview -> %s (%s bytes)", status, len(answer.get("b64") or ""))
+        return status, answer
     except Refused as r:
         logger.info("file -> %s %s", r.answer[0], r.answer[1].get("error"))
         return r.answer
+
+
+async def _file_response(file, real: Path, st: os.stat_result, head: bytes, q: dict) -> tuple[int, dict]:
+    mime, kind = _mime_of(real, head)
+    base = {"name": real.name, "size": st.st_size, "mime": mime, "mtime": _mtime(st)}
+    if (q.get("info") or [""])[0] not in ("", "0"):
+        _check_unchanged(file, st)
+        logger.info("file info -> 200")
+        return 200, {**base, "kind": kind, "max_bytes": MAX_FILE_BYTES,
+                     "chunk_bytes": CHUNK_DEFAULT}
+    if st.st_size > MAX_FILE_BYTES:
+        return _err(413, "too_large", "That file is too big to send to the phone.",
+                    size=st.st_size, max_bytes=MAX_FILE_BYTES)
+    offset = _int(q, "offset", 0)
+    length = _int(q, "length", CHUNK_DEFAULT)
+    if offset < 0 or offset > st.st_size or length <= 0:
+        return _err(400, "bad_request", "That request isn't right.")
+    want = (q.get("mtime") or [""])[0]
+    if want and want != base["mtime"]:
+        return _err(409, "changed", "That file changed on the computer. Try again.")
+    file.seek(offset)
+    data = await asyncio.to_thread(file.read, min(length, CHUNK_MAX))
+    _check_unchanged(file, st)
+    logger.info("file piece -> 200 (%s bytes)", len(data))
+    return 200, {**base, "offset": offset, "b64": base64.b64encode(data).decode("ascii"),
+                 "eof": offset + len(data) >= st.st_size}

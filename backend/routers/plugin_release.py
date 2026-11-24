@@ -13,7 +13,8 @@ Mounted under /relay (main.py):
                                 machine still verifies the signed manifest.
   GET  /relay/plugin/versions   ops only. Machines per Herald Bridge version,
                                 from the plugin_version each one reports on
-                                POST /tunnel/connect.
+                                POST /tunnel/connect, plus per Hermes version and
+                                Hermes auto-update state (why boxes skip).
 
 "Ops only" = header ``X-Herald-Ops-Token`` equal to HERALD_RELAY_OPS_TOKEN.
 Without that env var both answer 404, so nothing new is exposed until an
@@ -110,6 +111,8 @@ async def plugin_manifest():
 class UpdateNowRequest(BaseModel):
     device_token: Optional[str] = None
     all: bool = False
+    # True: "check Hermes now" (hermes_update.py) instead of Herald Bridge.
+    hermes: bool = False
 
 
 @router.post("/plugin/update-now", summary="Ask machines to check for an update now (ops)")
@@ -121,7 +124,7 @@ async def plugin_update_now(req: UpdateNowRequest,
     if not req.all and not req.device_token:
         raise HTTPException(status_code=400, detail={"error": "device_token_or_all"})
     tokens = list(tunnel._plugin_queues) if req.all else [req.device_token]
-    frame = {"type": "bridge_update", "force": True}
+    frame = {"type": "hermes_update"} if req.hermes else {"type": "bridge_update", "force": True}
     sse = edge = 0
     for t in tokens:
         q = tunnel._plugin_queues.get(t)
@@ -146,6 +149,8 @@ def count_versions(now: Optional[float] = None) -> dict:
     now = time.time() if now is None else now
     cutoff = now - ACTIVE_DAYS * 86400
     counts: dict[str, int] = {}
+    hermes: dict[str, int] = {}
+    hermes_states: dict[str, int] = {}
     total = 0
     for doc in firestore_client.get_db().collection("devices").stream():
         d = doc.to_dict() or {}
@@ -154,8 +159,36 @@ def count_versions(now: Optional[float] = None) -> dict:
         v = str(d.get("plugin_version") or "unknown (<0.8.0)")
         counts[v] = counts.get(v, 0) + 1
         total += 1
+        hu = d.get("hermes_update") if isinstance(d.get("hermes_update"), dict) else {}
+        hv = str(hu.get("current") or d.get("hermes_version") or "unknown")
+        hermes[hv] = hermes.get(hv, 0) + 1
+        hs = str(hu.get("reason") or hu.get("state") or "not_reported (<0.9.0)")
+        hermes_states[hs] = hermes_states.get(hs, 0) + 1
     rel = load_release()
     return {"total": total, "window_days": ACTIVE_DAYS,
             "latest": rel["manifest"].get("version") if rel else None,
             "rollout_percent": rel["manifest"].get("rollout_percent") if rel else None,
-            "versions": dict(sorted(counts.items(), key=lambda kv: -kv[1]))}
+            "versions": dict(sorted(counts.items(), key=lambda kv: -kv[1])),
+            "hermes_tested": (rel["manifest"].get("hermes") or {}).get("version") if rel else None,
+            "hermes_versions": dict(sorted(hermes.items(), key=lambda kv: -kv[1])),
+            "hermes_update_states": dict(sorted(hermes_states.items(), key=lambda kv: -kv[1]))}
+
+
+_HU_KEYS = {"enabled": bool, "state": str, "reason": str, "current": str, "target": str,
+            "last_result": str, "last_check": (int, float)}
+
+
+def clean_hermes_update(raw) -> Optional[dict]:
+    """Keep only known, short fields of what a machine reports about Hermes."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict = {}
+    for k, t in _HU_KEYS.items():
+        v = raw.get(k)
+        if isinstance(v, t) and not (t is not bool and isinstance(v, bool)):
+            out[k] = v[:64] if isinstance(v, str) else v
+    bad = raw.get("bad")
+    if isinstance(bad, list):
+        out["bad"] = [str(b)[:16] for b in bad[:10]]
+    out["at"] = time.time()
+    return out

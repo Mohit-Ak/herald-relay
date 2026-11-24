@@ -197,13 +197,32 @@ async def test_outside_home_traversal_and_symlinks(hermes, box, tmp_path):
 async def test_hermes_media_folder_and_temp_allowed(hermes, box):
     home, hh, tmp = box
     gen = hh / "cache" / "images" / "chart.png"
-    gen.write_bytes(png())
+    gen.write_bytes(b"\x89PNG\r\n\x1a\n")
     s, b = await call(hermes, hh, q(gen, info=1))
     assert s == 200 and b["kind"] == "image" and b["mime"] == "image/png"
     t = tmp / "out.pdf"
     t.write_bytes(b"%PDF-1.4")
     s, b = await call(hermes, hh, q(t, info=1))
     assert s == 200 and b["mime"] == "application/pdf"
+
+
+async def test_file_replaced_after_path_check_is_not_served(hermes, box, monkeypatch):
+    home, hh, _ = box
+    allowed = home / "attachment.txt"
+    allowed.write_text("original")
+    blocked = home / ".private"
+    blocked.write_text("not an attachment")
+    check = local_files.check_path
+
+    def replace_after_check(path, hermes_home):
+        result = check(path, hermes_home)
+        allowed.unlink()
+        allowed.symlink_to(blocked)
+        return result
+
+    monkeypatch.setattr(local_files, "check_path", replace_after_check)
+    status, answer = await call(hermes, hh, q(allowed))
+    assert status in (404, 409) and "b64" not in answer
 
 
 async def test_operator_roots_replace_home(hermes, box, tmp_path, monkeypatch):
@@ -253,9 +272,9 @@ async def test_preview_falls_back_to_hermes_python(hermes, box, monkeypatch):
     monkeypatch.setattr(image_preview, "answer", no_pillow)
     s, b = await call(hermes, hh, q(f, w=320), py=[sys.executable])
     assert s == 200 and b["mime"] == "image/webp" and b["width"] == 320
-    # And with no Hermes either: the small original as it is.
+    # Never send an unprocessed preview that may still carry metadata.
     s, b = await call(hermes, hh, q(f, w=320), py=None)
-    assert s == 200 and b["mime"] == "image/png" and base64.b64decode(b["b64"]) == f.read_bytes()
+    assert s == 503 and b["error"] == "preview_unavailable" and "b64" not in b
 
 
 async def test_edge_sends_a_big_answer_in_pieces(hermes, box):

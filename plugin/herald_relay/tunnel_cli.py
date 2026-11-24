@@ -2,7 +2,14 @@
 
 This is the ONE command a self-hoster runs on any Linux box::
 
-    pip install hermes-herald
+    python3 -m venv ~/.herald-relay
+    ~/.herald-relay/bin/pip install "git+https://github.com/Mohit-Ak/herald-relay#subdirectory=plugin"
+    ~/.herald-relay/bin/herald-tunnel setup   # register device, write config, install service
+
+Installed anywhere else (Hermes' venv, ``pip --user``), ``setup`` and ``run``
+move it into ``~/.herald-relay`` themselves, because only there can it keep
+itself up to date (migrate.py). Other subcommands::
+
     herald-tunnel setup            # register device, write config, install service
     herald-tunnel run              # or run in the foreground without systemd
     herald-tunnel status           # is the tunnel up, end to end?
@@ -213,6 +220,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
               "api_server platform configured on this machine?", file=sys.stderr)
         return 1
 
+    if _move_before_setup(args):
+        return 0  # not reached: setup re-ran from ~/.herald-relay
+
     existing = _read_yaml_config().get("device_token", "")
     if existing and not args.new_token:
         token = existing
@@ -252,6 +262,38 @@ def cmd_setup(args: argparse.Namespace) -> int:
           f"  sudo loginctl enable-linger {os.getenv('USER', '<user>')}")
     print("\nVerify end-to-end with: herald-tunnel status")
     return 0
+
+
+def _move_before_setup(args: argparse.Namespace, *, reexec=None) -> bool:
+    """Running from a venv Herald doesn't own? Install the owned copy in
+    ~/.herald-relay and run setup from there, so the unit, keepalive and
+    skills name the copy that updates itself. A failure only warns: setup
+    then carries on here, as before."""
+    from . import bridge_update, migrate  # noqa: PLC0415
+    ok, reason = migrate.eligibility(_read_yaml_config(), hermes_home=HERMES_HOME)
+    if not ok:
+        if reason not in ("already_managed", "source_checkout"):
+            print(f"note: Herald Bridge stays where it is ({reason}), so it won't "
+                  "update itself.", file=sys.stderr)
+        return False
+    target = migrate.target_layout()
+    relay_url = (args.relay_url or _read_yaml_config().get("relay_url")
+                 or DEFAULT_RELAY).rstrip("/")
+    print(f"Moving Herald Bridge into {target.root} so it keeps itself up to date…")
+    try:
+        version = asyncio.run(migrate.prepare(
+            target, fetch=lambda: bridge_update.fetch_manifest(relay_url),
+            download=lambda m: bridge_update.download_wheel(target, m)))
+    except Exception as e:  # noqa: BLE001
+        code = getattr(e, "code", type(e).__name__)
+        print(f"WARNING: could not install Herald Bridge into {target.root} ({code}). "
+              "Continuing here; this copy will not update itself.", file=sys.stderr)
+        return False
+    migrate.record(HERMES_HOME, {"from": migrate.from_where(), "to": str(target.root),
+                                 "version": version, "changed": ["setup"], "result": "moved"})
+    print(f"Herald Bridge {version} installed in {target.root}; finishing setup from there.")
+    (reexec or migrate.reexec)(target.root, ["setup", *sys.argv[2:]])
+    return True
 
 
 def _self_exec() -> str:
@@ -312,15 +354,29 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     updater = bridge_update.BridgeUpdater(
         relay_url=relay_url, device_token=device_token, busy=client.busy, cfg=cfg,
-        layout=layout, detect=False, probation=(boot == "probation"))
+        layout=layout, detect=False, probation=(boot == "probation"),
+        hermes_home=HERMES_HOME)
+    if layout is None:
+        logger.info("Herald Bridge runs from %s, which it can't update%s", sys.prefix,
+                    "; it moves itself into ~/.herald-relay once the tunnel is idle"
+                    if updater.migration else f" ({updater.migration_reason})")
     client.updater = updater
+    from . import hermes_update  # noqa: PLC0415
+    hermes_updater = hermes_update.HermesUpdater(
+        relay_url=relay_url, device_token=device_token, api_key=key,
+        hermes_home=HERMES_HOME, cfg=cfg, busy=client.busy, local_url=local_hermes,
+        # Herald Cloud machines get Hermes from their image (cloud-ops).
+        cloud=layout is not None and layout.root == Path.home() / ".herald" / "venv")
+    client.hermes_updater = hermes_updater
 
     async def _main() -> None:
         updates = asyncio.create_task(updater.run_forever())
+        hermes_updates = asyncio.create_task(hermes_updater.run_forever())
         try:
             await client.run_forever()
         finally:
             updates.cancel()
+            hermes_updates.cancel()
 
     try:
         asyncio.run(_main())
@@ -335,7 +391,8 @@ def cmd_selfcheck(args: argparse.Namespace) -> int:
     import importlib  # noqa: PLC0415
     from . import bridge_update  # noqa: PLC0415
     for mod in ("relay_client", "edge_tunnel", "local_screen", "local_passwords",
-                "local_bridge", "agent_info", "local_skills", "bridge_update", "plugin"):
+                "local_bridge", "agent_info", "local_skills", "bridge_update", "plugin",
+                "migrate", "hermes_update"):
         importlib.import_module(f"herald_relay.{mod}")
     import cryptography.hazmat.primitives.asymmetric.ed25519  # noqa: F401,PLC0415
     print(json.dumps({"version": bridge_update.current_version()}))
@@ -353,7 +410,8 @@ def cmd_update(args: argparse.Namespace) -> int:
                           and bridge_update.Layout.detect() is not None,
                           "last_result": st.get("last_result"),
                           "pending": bool(st.get("pending")),
-                          "bad": st.get("bad", {})}))
+                          "bad": st.get("bad", {}),
+                          "hermes": _hermes_update_summary()}))
         return 0
     if bridge_update.opted_out(cfg):
         print("Automatic updates are turned off on this computer "
@@ -361,10 +419,15 @@ def cmd_update(args: argparse.Namespace) -> int:
         return 2
     layout = bridge_update.Layout.detect()
     if layout is None:
-        print("This Herald Bridge was not installed in its own venv "
-              "(~/.herald-relay), so it can't update itself. Reinstall it "
-              "there, or update it with pip.")
-        return 2
+        from . import migrate  # noqa: PLC0415
+        ok, reason = migrate.eligibility(cfg, hermes_home=HERMES_HOME, managed=False)
+        if not ok:
+            print("This Herald Bridge was not installed in its own venv "
+                  f"(~/.herald-relay) and can't move there ({reason}), so it "
+                  "can't update itself. Update it with pip.")
+            return 2
+        if not _tunnel_running():
+            return _move_now(cfg)
     if _tunnel_running():
         # The running tunnel owns the swap (it knows when nothing is in
         # flight); it picks this request up within half a minute.
@@ -382,6 +445,36 @@ def cmd_update(args: argparse.Namespace) -> int:
     print(json.dumps({"result": res, "version": bridge_update.current_version(),
                       "target": upd.target}))
     return 0 if res in ("current", "restarting") else 1
+
+
+def _move_now(cfg: dict) -> int:
+    """`update` with no tunnel running, from a venv Herald doesn't own:
+    install the owned copy and point the launchers at it."""
+    from . import bridge_update, migrate  # noqa: PLC0415
+    target = migrate.target_layout()
+    relay_url = (cfg.get("relay_url") or DEFAULT_RELAY).rstrip("/")
+    try:
+        version = asyncio.run(migrate.prepare(
+            target, fetch=lambda: bridge_update.fetch_manifest(relay_url),
+            download=lambda m: bridge_update.download_wheel(target, m)))
+    except Exception as e:  # noqa: BLE001
+        print(json.dumps({"result": "move_failed", "error": getattr(e, "code", type(e).__name__)}))
+        return 1
+    changed = migrate.repoint_launchers(target.root, hermes_home=HERMES_HOME)
+    migrate.record(HERMES_HOME, {"from": migrate.from_where(), "to": str(target.root),
+                                 "version": version, "changed": changed, "result": "moved"})
+    print(json.dumps({"result": "moved", "version": version, "root": str(target.root),
+                      "changed": changed}))
+    return 0
+
+
+def _hermes_update_summary() -> dict:
+    """What Herald Bridge last did about Hermes itself (hermes_update.py)."""
+    from . import hermes_update  # noqa: PLC0415
+    hs = hermes_update.load_state(hermes_update.state_path(HERMES_HOME))
+    return {"auto_update": not hermes_update.opted_out(_read_yaml_config()),
+            "last_result": hs.get("last_result"), "pending": bool(hs.get("pending")),
+            "halted": hs.get("halted"), "bad": hs.get("bad", {})}
 
 
 def cmd_ensure(args: argparse.Namespace) -> int:

@@ -1,23 +1,42 @@
-# hermes-herald
+# herald-bridge (Herald Bridge)
 
 Connect your local Hermes AI agent to Herald — voice-first conversations on mobile.
 
-## Install in 2 commands
+Full guide: <https://heraldbridge.dev/docs/setup>.
+
+## Install (it keeps itself up to date)
+
+Install into its own venv at `~/.herald-relay`, the only place Herald Bridge can
+update itself. It is published on PyPI as **herald-bridge**:
 
 ```bash
-pip install hermes-herald
+python3 -m venv ~/.herald-relay
+~/.herald-relay/bin/pip install -U herald-bridge
+~/.herald-relay/bin/herald-tunnel setup     # registers this machine, installs the service
+~/.herald-relay/bin/herald-tunnel status    # local Hermes → relay → this tunnel, end to end
 ```
 
-Then add to your Hermes config (`~/.hermes/config.yaml`):
+`setup` writes the `herald:` block of `~/.hermes/config.yaml` for you:
 
 ```yaml
-plugins:
-  herald-relay:
-    relay_url: wss://relay.herald.app
-    device_token: YOUR_TOKEN  # Get this from the Herald app
-    push_on_approval: true
-    push_on_done: true
+herald:
+  relay_url: https://herald-api.eventhorizonlabs.xyz
+  device_token: <registered by setup>
+  # auto_update: false   # pin this version
 ```
+
+(Older docs said `plugins.herald-relay` and `wss://relay.herald.app`. Nothing reads
+that key, and that host never existed.)
+
+**Installed somewhere else?** A bridge installed with `pip install` into Hermes' own
+venv, with `pip --user`, or into any other venv moves itself into `~/.herald-relay`:
+`herald-tunnel setup` does it before writing anything, and a running tunnel does it
+in the background once nothing is in flight (`herald_relay/migrate.py`). It installs
+the release named by the signed manifest, rewrites only the `ExecStart` line of the
+systemd user unit (and the keepalive script and skills), and re-execs from there. The
+device token and settings live in `~/.hermes/config.yaml`, so pairing is unchanged.
+Not moved: developer checkouts (`pip install -e`), `HERALD_BRIDGE_MIGRATE=0`, automatic
+updates turned off, or a tunnel for a non-default `HERMES_HOME`.
 
 ## How it works
 
@@ -26,19 +45,19 @@ Hermes works normally; Herald notifies you on mobile when it needs you or finish
 
 ## Configuration
 
-| Key | Default | Description |
+| Key (`herald:` in `~/.hermes/config.yaml`) | Default | Description |
 |-----|---------|-------------|
-| `relay_url` | `wss://relay.herald.app` | Herald Cloud WebSocket URL |
-| `device_token` | `$HERALD_DEVICE_TOKEN` | Push token from the Herald mobile app |
-| `push_on_approval` | `true` | Notify immediately when Hermes needs approval |
-| `push_on_done` | `true` | Notify when a long-running task completes (>10 s) |
+| `relay_url` | `https://herald-api.eventhorizonlabs.xyz` | Herald relay this machine dials out to |
+| `device_token` | registered by `setup` | Identifies this machine at the relay |
+| `auto_update` | `true` | `false` pins this version |
 
 ## Environment variables
 
-- `HERALD_DEVICE_TOKEN` — fallback if `device_token` not in config
-- `HERALD_LOCAL_HERMES_URL` — override local Hermes URL (default: `http://localhost:8642`)
+- `HERALD_RELAY_URL`, `HERALD_DEVICE_TOKEN` — fallbacks if the `herald:` block is missing
+- `HERALD_LOCAL_HERMES_URL` — override local Hermes URL (default: `http://127.0.0.1:8642`)
 - `HERALD_BRIDGE_AUTO_UPDATE=0` — turn automatic updates off (or `herald.auto_update: false`
   in `~/.hermes/config.yaml`). Also refuses "update now" from the app.
+- `HERALD_BRIDGE_MIGRATE=0` — don't move a bridge installed elsewhere into `~/.herald-relay`.
 
 ## Automatic updates (0.8.0+)
 
@@ -59,10 +78,12 @@ Hermes works normally; Herald notifies you on mobile when it needs you or finish
    (3 starts) or cannot register while the relay is reachable, `~/.herald-relay` is flipped
    back, the version is marked bad and the previous build restarts.
 
-Only a venv Herald owns is touched: `~/.herald-relay`, `~/.herald/venv` (Herald Cloud), or
-`HERALD_BRIDGE_ROOT`. `herald-tunnel update` asks for an update now;
+Only a venv Herald owns is updated: `~/.herald-relay`, `~/.herald/venv` (Herald Cloud), or
+`HERALD_BRIDGE_ROOT`. A bridge installed anywhere else moves itself into `~/.herald-relay`
+first (see "Installed somewhere else?" above). `herald-tunnel update` asks for an update now;
 `herald-tunnel update --status` shows the last result. Machines on 0.7.x and older have no
-updater: they need one manual `pip install -U` to reach 0.8.0.
+updater: they need one manual `pip install -U` to reach 0.8.0 (0.8.1+ when installed outside
+`~/.herald-relay`, so the move kicks in).
 
 Releasing: `python scripts/release_plugin.py --rollout 10` (builds, attaches the wheel to
 GitHub release `plugin-v<version>`, signs with Secret Manager `herald-relay-signing-key`,
@@ -70,7 +91,40 @@ writes `backend/release/plugin-manifest.json`), merge that file, then
 `--resign --rollout 100` when the first slice is healthy. The relay counts machines per
 version at `GET /relay/plugin/versions` (header `X-Herald-Ops-Token`).
 
-## Files the agent makes (0.9.0+)
+## Herald Bridge keeps Hermes updated (0.9.0+)
+
+Hermes has no automatic update. `herald-tunnel run` updates it, but only to the Hermes
+release Herald tested, and only where that's safe (`herald_relay/hermes_update.py`):
+
+- **Signed pin.** The same signed manifest may carry
+  `"hermes": {"version", "tag", "git_sha", "rollout_percent"}`, set with
+  `release_plugin.py --resign --hermes-tag vX.Y.Z --hermes-rollout 10`. No block means
+  nothing happens. A new tag starts at 0 %.
+- **Safe boxes only.** The box must be an official source checkout run by a `hermes-gateway*`
+  systemd user unit, with a clean tree and **no local commits**. Carried patches are skipped and
+  reported, never clobbered. Herald Cloud (image-managed), forks and opted-out boxes are skipped.
+- **Never past the tested release, never backwards.** The upstream tag must be the signed commit
+  and the box must be strictly behind it. If upstream already shipped a newer stable release,
+  wait, because `hermes update` would go there.
+- **Staged, then idle.** The release is compiled in a throwaway git worktree. It is applied only
+  after the gateway has reported no active agent, API run or delegation (`/health/detailed`)
+  for 2 minutes.
+- **Hermes installs it.** `hermes update --yes --channel stable --no-gateway-restart` handles
+  dependencies, config migrations and the downgrade guard. We check it landed on the signed
+  commit.
+- **Restart, health, rollback.** The `hermes-gateway*` units are restarted through the user's
+  systemd. Checks: local `/health` must report the new version and `/v1/models` must answer with
+  the key. Through the relay, `/health`, `/api/soul` and `/v1/skills` must answer. On any failure
+  the checkout goes back to the previous commit, the gateway restarts and is re-checked, and the
+  version is marked bad on that box. A failed rollback halts updates there (`rollback_failed`)
+  until an operator looks.
+- **Opt out:** `HERALD_HERMES_AUTO_UPDATE=0` or `herald.hermes_auto_update: false`.
+- **Fleet view:** every connect reports `hermes_update` (current, target, state, why skipped).
+  `GET /relay/plugin/versions` counts Hermes versions and skip reasons.
+  `POST /relay/plugin/update-now {"device_token": …, "hermes": true}` checks one box now
+  (skips the rollout slice, never the safety checks).
+
+## Files the agent makes
 
 When the agent writes `MEDIA:/absolute/path` in a reply, the Herald app shows the file: a
 picture inline, anything else as an attachment to open, save or share. The app fetches it
