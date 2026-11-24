@@ -115,7 +115,11 @@ async def test_the_whole_round_trip_carries_only_ciphertext(hermes, tmp_path, ca
     status, body = await door(hermes, tmp_path, "GET")
     assert status == 200 and [r["id"] for r in body["requests"]] == [req["id"]]
     shown = body["requests"][0]
-    assert secure_entry.verify(shown) and "sk" not in json.dumps(shown)
+    assert secure_entry.verify(shown)
+    assert set(shown) == {
+        "v", "id", "kind", "origin", "username", "label",
+        "created_at", "expires_at", "pk", "bridge_key", "sig",
+    }
     assert (secure_entry.spool(tmp_path) / f"{req['id']}.seen").exists()   # the app picked it up
 
     sealed = secure_entry.seal(shown, {"secret": SECRET, "username": "ann", "save": False})

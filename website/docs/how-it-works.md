@@ -18,7 +18,7 @@ Herald is a three-component system:
 ┌─────────────────────┐          ┌──────────────────────┐          ┌──────────────────────┐
 │                     │          │                       │          │                      │
 │   Hermes (laptop)   │◄────────►│   Herald Relay        │◄────────►│   Herald (phone)     │
-│   + herald plugin   │  WSS/TLS │   relay.herald.dev    │  FCM/APNs│   iOS / Android      │
+│   + herald plugin   │  WSS/TLS │   Herald relay        │  FCM/APNs│   iOS / Android      │
 │                     │          │                       │          │                      │
 └─────────────────────┘          └──────────────────────┘          └──────────────────────┘
         │                                  │                                  │
@@ -42,7 +42,7 @@ Herald is a three-component system:
 
 Most "remote AI" setups require the AI machine to have a public IP or VPN — because your phone needs to reach it. Herald flips this.
 
-The Hermes herald plugin **dials outbound** to `relay.herald.dev` over a standard TLS WebSocket (port 443). This works from:
+The Hermes herald plugin **dials outbound** to the Herald relay (`herald-api.eventhorizonlabs.xyz`) over a standard TLS WebSocket (port 443). This works from:
 
 - A laptop behind home NAT
 - A corporate network with an outbound-only firewall

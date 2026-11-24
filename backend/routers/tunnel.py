@@ -295,6 +295,9 @@ class TunnelConnectRequest(BaseModel):
     hermes_version: str = "unknown"
     # Herald Bridge (hermes-herald) version, sent by 0.8.0+ (herald#505).
     plugin_version: Optional[str] = None
+    # Herald Bridge keeps Hermes updated (0.9.0+): Hermes version, target and
+    # why a box isn't updating. Stored trimmed for GET /relay/plugin/versions.
+    hermes_update: Optional[dict] = None
 
 
 class TunnelUpdateRequest(BaseModel):
@@ -350,7 +353,13 @@ async def _send_fcm(
         return
     fcm_token = doc.to_dict().get("fcm_token")
     if not fcm_token:
-        logger.warning(f"[FCM] no fcm_token for {device_token[:8]}... – skipping push")
+        # Same outage as the UNREGISTERED branch below, one push later: after
+        # a dead token is cleared every push for a live plugin lands here.
+        connected = is_plugin_connected(device_token)
+        (logger.error if connected else logger.warning)(
+            f"[FCM] no fcm_token for {device_token[:8]}... – skipping push"
+            + (" (plugin CONNECTED: push routing broken)" if connected else "")
+        )
         return
 
     # Don't waste a network round-trip (and log an alarming 404) on a token
@@ -430,10 +439,25 @@ async def _send_fcm(
             # and let the device re-register. This is what keeps the `devices`
             # collection from silently accumulating dead tokens.
             if resp.status_code == 404 or "UNREGISTERED" in resp.text.upper():
-                logger.warning(
-                    f"[FCM] token for {device_token[:8]}... is no longer "
-                    f"registered — clearing it (device must re-register)"
-                )
+                # A plugin streaming for this device RIGHT NOW means a live
+                # agent is producing pushes that now have nowhere to go — the
+                # app registered its current FCM token somewhere else (#263:
+                # the phone registered under one machine's device token only,
+                # so the other machine's doc held a token FCM had retired).
+                # That is an outage, not housekeeping: ERROR so it alerts.
+                if is_plugin_connected(device_token):
+                    logger.error(
+                        f"[FCM] PUSH ROUTING BROKEN: token for "
+                        f"{device_token[:8]}... is UNREGISTERED while its "
+                        f"plugin is connected — clearing it; this machine's "
+                        f"pushes are dropped until the app re-registers "
+                        f"under {device_token[:8]}..."
+                    )
+                else:
+                    logger.warning(
+                        f"[FCM] token for {device_token[:8]}... is no longer "
+                        f"registered — clearing it (device must re-register)"
+                    )
                 try:
                     db.collection("devices").document(device_token).update(
                         {"fcm_token": None}
@@ -555,6 +579,9 @@ async def tunnel_connect(req: TunnelConnectRequest):
         # Version telemetry: GET /relay/plugin/versions counts these.
         fields["plugin_version"] = plugin_version
         fields["plugin_version_at"] = fields["last_seen"]
+    hu = plugin_release.clean_hermes_update(req.hermes_update)
+    if hu:
+        fields["hermes_update"] = hu
     db.collection("devices").document(req.device_token).update(fields)
     logger.info(
         f"[tunnel/connect] device={req.device_token[:8]}... "

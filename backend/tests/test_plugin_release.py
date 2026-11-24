@@ -143,3 +143,57 @@ async def test_update_now_reaches_a_connected_tunnel(app, monkeypatch):
                          headers={"X-Herald-Ops-Token": "s3cret"})
     assert r.json()["sent"] == 1
     assert q.get_nowait() == {"type": "bridge_update", "force": True}
+
+
+# ── Herald Bridge keeps Hermes updated: fleet view ───────────────────────────
+
+@pytest.mark.asyncio
+async def test_connect_records_hermes_update_state_trimmed(app, manifest_file):
+    from services.firestore_client import get_db
+    _device("dev-hu")
+    async with _client(app) as c:
+        r = await c.post("/tunnel/connect", json={
+            "device_token": "dev-hu", "agent_card": {}, "hermes_version": "0.23.2",
+            "plugin_version": "0.9.0",
+            "hermes_update": {"enabled": True, "state": "skipped", "reason": "carried_patches",
+                              "current": "0.23.2", "target": "0.23.3", "bad": ["0.23.1"],
+                              "secret": "must not be stored", "last_result": "x" * 500}})
+    assert r.status_code == 200
+    hu = get_db().collection("devices").document("dev-hu").get().to_dict()["hermes_update"]
+    assert hu["reason"] == "carried_patches" and hu["current"] == "0.23.2"
+    assert "secret" not in hu and len(hu["last_result"]) == 64 and hu["at"] > 0
+
+
+@pytest.mark.asyncio
+async def test_versions_counts_hermes_versions_and_why_boxes_skip(app, tmp_path, monkeypatch):
+    m = {"package": "hermes-herald", "version": "0.9.0", "rollout_percent": 100,
+         "hermes": {"tag": "v0.23.3", "version": "0.23.3", "git_sha": "a" * 40}}
+    p = tmp_path / "m.json"
+    p.write_text(json.dumps({"payloadType": "x", "payload": base64.b64encode(
+        json.dumps(m).encode()).decode(), "signatures": []}))
+    monkeypatch.setenv("HERALD_PLUGIN_MANIFEST", str(p))
+    monkeypatch.setenv("HERALD_RELAY_OPS_TOKEN", "s3cret")
+    _device("h1", agent_card={}, hermes_update={"state": "current", "current": "0.23.3"})
+    _device("h2", agent_card={}, hermes_update={"state": "skipped", "reason": "carried_patches",
+                                                "current": "0.23.2"})
+    _device("h3", agent_card={}, hermes_version="0.22.0")      # bridge older than 0.9.0
+    async with _client(app) as c:
+        j = (await c.get("/relay/plugin/versions", headers={"X-Herald-Ops-Token": "s3cret"})).json()
+    assert j["hermes_tested"] == "0.23.3"
+    assert j["hermes_versions"]["0.23.3"] >= 1 and j["hermes_versions"]["0.22.0"] >= 1
+    assert j["hermes_update_states"]["carried_patches"] >= 1
+    assert j["hermes_update_states"]["not_reported (<0.9.0)"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_update_now_can_ask_for_hermes(app, monkeypatch):
+    import asyncio
+
+    from routers import tunnel
+    monkeypatch.setenv("HERALD_RELAY_OPS_TOKEN", "s3cret")
+    q: asyncio.Queue = asyncio.Queue()
+    monkeypatch.setitem(tunnel._plugin_queues, "dev-h", q)
+    async with _client(app) as c:
+        r = await c.post("/relay/plugin/update-now", json={"device_token": "dev-h", "hermes": True},
+                         headers={"X-Herald-Ops-Token": "s3cret"})
+    assert r.json()["sent"] == 1 and q.get_nowait() == {"type": "hermes_update"}

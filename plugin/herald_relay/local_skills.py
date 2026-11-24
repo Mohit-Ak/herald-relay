@@ -24,6 +24,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from .cards_skill import CARDS_REFERENCES, CARDS_SKILL
+
 SCREEN_SKILL = """---
 name: herald-screen
 description: Show the user a screen they can watch or take over, when a step needs their hands (sign-in, CAPTCHA, 2FA, a GUI-only setting).
@@ -193,137 +195,6 @@ Check how many are saved: `{{herald_tunnel}} passwords count`.
 # canonical text is herald's backend/cloud/skills/herald-cards/SKILL.md (the
 # copy cloud agents get); this must stay identical: herald's
 # test_cards_skill and test_local_cards_skill here both check it.
-CARDS_SKILL = """---
-name: herald-cards
-description: Use when the user talks to you through the Herald app. Show results, comparisons, lists, progress, status and choices as visual cards in your reply, without being asked.
-version: 1.0.0
-author: Herald
-metadata:
-  hermes:
-    tags: [Herald, cards, A2UI, UI, voice, visual, display]
----
-
-# Herald cards
-
-The Herald app shows the user your reply as a conversation, and draws
-**cards** from fenced blocks in it. Like ChatGPT voice: the words keep
-flowing, and a card appears when there is something worth seeing.
-
-**Only on Herald.** Use cards only when the run's instructions say the user
-is on the Herald app. On Telegram, the CLI or anywhere else, never write these
-fences: they show up as raw code.
-
-## When to add a card (don't wait to be asked)
-
-Add one, unasked, when your reply has:
-
-* results of a search or lookup (places, flights, products, emails, files)
-* a comparison of two or more options
-* a list the user will scan (files, events, tasks, links)
-* progress of a long task, or a status summary (system, project, account)
-* options to choose from (buttons)
-* something to copy or keep (a drafted message, an address, specs)
-
-No card for small talk, one-line facts ("what time is it"), yes/no answers,
-a question back to the user, or any reply that is a sentence or two. At most
-one card per message. Use real values only; never invent data to fill a card.
-
-## Cards are never read aloud
-
-The user may be listening, not looking. First write one or two plain
-sentences that stand alone and carry the answer ("The cheapest is Air Canada
-at $412, and the card has all five."). Then the card. Don't repeat every
-number in prose, and never let "see the card" be the whole answer.
-
-## Cards during a long task
-
-A card in an update you write before you finish (first results, a progress
-checklist) appears in the app as soon as its closing fence is written. Use
-that for real milestones, not every step.
-
-## The A2UI card
-
-A fenced block with the language `a2ui`. Its body is a JSON array of A2UI
-v1.0 messages: `createSurface`, then `updateComponents`. Components are a
-flat list; each has an `id` and a `component` type; the one with id `root` is
-drawn; containers name their children by id. At most 40 components.
-
-Types: `Text{text, variant: body|caption}` (text allows **bold**),
-`Column{children}`, `Row{children, justify?}`, `List{children}`,
-`Card{child}`, `Divider{}`, `Icon{name}`,
-`Button{child, variant: primary|default|borderless, action}`. No images.
-A Button's `action` is `{"event": {"name": "...", "context": {}}}`: tapping it
-sends the event name as the user's next message, so make the name the full
-reply in plain words ("Book the 7pm table"). Say state in words ("Done",
-"Running", "Failed"), never with colour alone.
-
-Results list:
-
-```a2ui
-[{"version":"1.0","createSurface":{"surfaceId":"r1","catalogId":"https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json"}},
- {"version":"1.0","updateComponents":{"surfaceId":"r1","components":[
-  {"id":"root","component":"Column","children":["h","a","b"]},
-  {"id":"h","component":"Text","text":"**3 Thai places open now**"},
-  {"id":"a","component":"Text","text":"**Kiin** · 0.4 km · 4.6 ★ · $$"},
-  {"id":"b","component":"Text","text":"**Pai** · 1.1 km · 4.5 ★ · $$"}]}}]
-```
-
-Comparison:
-
-```a2ui
-[{"version":"1.0","createSurface":{"surfaceId":"c1","catalogId":"https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json"}},
- {"version":"1.0","updateComponents":{"surfaceId":"c1","components":[
-  {"id":"root","component":"Row","children":["x","y"]},
-  {"id":"x","component":"Card","child":"xc"},
-  {"id":"xc","component":"Column","children":["x1","x2"]},
-  {"id":"x1","component":"Text","text":"**Air Canada**"},
-  {"id":"x2","component":"Text","text":"$412 · nonstop · 7h 10m","variant":"caption"},
-  {"id":"y","component":"Card","child":"yc"},
-  {"id":"yc","component":"Column","children":["y1","y2"]},
-  {"id":"y1","component":"Text","text":"**WestJet**"},
-  {"id":"y2","component":"Text","text":"$389 · 1 stop · 9h 45m","variant":"caption"}]}}]
-```
-
-Progress or status:
-
-```a2ui
-[{"version":"1.0","createSurface":{"surfaceId":"p1","catalogId":"https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json"}},
- {"version":"1.0","updateComponents":{"surfaceId":"p1","components":[
-  {"id":"root","component":"Column","children":["t","s1","s2","s3"]},
-  {"id":"t","component":"Text","text":"**Release 2.4** · step 2 of 3"},
-  {"id":"s1","component":"Text","text":"Done: tests passed (412)"},
-  {"id":"s2","component":"Text","text":"Running: building the app"},
-  {"id":"s3","component":"Text","text":"Waiting: upload","variant":"caption"}]}}]
-```
-
-Choices:
-
-```a2ui
-[{"version":"1.0","createSurface":{"surfaceId":"o1","catalogId":"https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json"}},
- {"version":"1.0","updateComponents":{"surfaceId":"o1","components":[
-  {"id":"root","component":"Column","children":["q","b1","b2"]},
-  {"id":"q","component":"Text","text":"Which table?"},
-  {"id":"b1","component":"Button","child":"l1","variant":"primary","action":{"event":{"name":"Book the 7pm table at Dishoom","context":{}}}},
-  {"id":"l1","component":"Text","text":"7pm · Dishoom"},
-  {"id":"b2","component":"Button","child":"l2","action":{"event":{"name":"Book the 8:30 table at Gymkhana","context":{}}}},
-  {"id":"l2","component":"Text","text":"8:30 · Gymkhana"}]}}]
-```
-
-## Copy cards
-
-Anything the user may want to copy, keep or forward (a drafted message, a
-summary, an address, settings) goes in a fenced block with the language
-`herald-card`: first line `title: ...`, then the content as markdown. The app
-shows it with a Copy button. Commands and code go in ordinary fenced code
-blocks, which get a Copy button too. When asked for a card or something to
-copy, use these; never say the app can't.
-
-```herald-card
-title: Reply to Sam
-Hi Sam, Thursday at 3 works. See you at the office.
-```
-"""
-
 SKILLS = {"herald-screen": SCREEN_SKILL, "herald-passwords": PASSWORDS_SKILL,
           "herald-cards": CARDS_SKILL}
 
@@ -342,7 +213,7 @@ def homes(hermes_home: Path) -> list[Path]:
 
 def install(hermes_home: Path, command: str = "herald-tunnel",
             all_profiles: bool = False) -> list[Path]:
-    """Write the skills; returns the files written. `command` is how to run
+    """Write the skills; returns the SKILL.md entry points. `command` is how to run
     herald-tunnel on this machine. A profile that can't be written is
     skipped, not fatal."""
     written = []
@@ -351,13 +222,16 @@ def install(hermes_home: Path, command: str = "herald-tunnel",
         try:
             for name, text in SKILLS.items():
                 d = home / "skills" / "herald" / name
-                d.mkdir(parents=True, exist_ok=True)
-                p = d / "SKILL.md"
-                tmp = p.with_suffix(".md.tmp")
-                tmp.write_text(text.replace("{{herald_tunnel}}", command)
-                               .replace("{{hermes_home}}", str(home)), encoding="utf-8")
-                os.replace(tmp, p)
-                written.append(p)
+                files = dict(CARDS_REFERENCES) if name == "herald-cards" else {}
+                files["SKILL.md"] = text.replace("{{herald_tunnel}}", command).replace("{{hermes_home}}", str(home))
+                for relative, content in files.items():
+                    p = d / relative
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = p.with_suffix(".md.tmp")
+                    tmp.write_text(content, encoding="utf-8")
+                    os.replace(tmp, p)
+                    if relative == "SKILL.md":
+                        written.append(p)
         except OSError:
             if first:
                 raise

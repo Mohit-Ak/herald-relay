@@ -70,12 +70,7 @@ Unused credits roll over indefinitely. There is no subscription — you pay only
 
 Credits is the default. Your config only needs:
 
-```yaml
-plugins:
-  herald-relay:
-    device_token: "your-token-here"
-    # mode: credits  ← this is the default, you can omit it
-```
+Nothing to configure on your machine: billing is handled in the Herald app (**Settings → Billing**).
 
 ---
 
@@ -115,13 +110,7 @@ At 10 bursts/month: **$0.11 in API + $2 relay = $2.11 total** — more expensive
 
 ### Enabling BYOK mode
 
-```yaml
-plugins:
-  herald-relay:
-    device_token: "your-token-here"
-    mode: byok
-    gemini_api_key: "AIzaSyYOUR_KEY_HERE"
-```
+Nothing to configure on your machine: billing is handled in the Herald app (**Settings → Billing**).
 
 ### Paying the relay fee
 
@@ -131,30 +120,7 @@ The $2/month relay fee is billed through the Herald app under **Settings → Bil
 
 ## Checking your usage
 
-At any time, run:
-
-```bash
-hermes herald status
-```
-
-Output:
-
-```
-Herald Plugin Status
-────────────────────
-Mode:          credits
-Device:        iPhone 15 Pro (••••a3f2)
-Relay:         connected (us-east)
-
-This month:
-  Bursts used:   12 / 20 (free tier)
-  Bursts remain: 8 free, then ~$0.05 each
-  Paid credits:  $5.00 balance (~100 bursts)
-
-Billing cycle resets: Aug 1, 2025
-```
-
----
+Usage and balance are shown in the Herald app under **Settings → Billing**.
 
 ## FAQ
 

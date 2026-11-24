@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Name claim only. Herald Bridge itself is published as `herald-bridge`
+# (built from plugin/ by .github/workflows/pypi-publish.yml).
+# Keep this version below every real Herald Bridge release: an installed
+# 0.8.x bridge (distribution hermes-herald) must never see this as an upgrade.
+[project]
+name = "hermes-herald"
+version = "0.0.1"
+description = "Placeholder. Herald Bridge is published as herald-bridge."
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
+classifiers = ["Development Status :: 7 - Inactive"]
+
+[project.scripts]
+hermes-herald = "_hermes_herald_placeholder:main"
+
+[project.urls]
+"Herald Bridge" = "https://pypi.org/project/herald-bridge/"
+"Repository" = "https://github.com/Mohit-Ak/herald-relay"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hermes_herald"]
+only-include = ["src/hermes_herald", "src/_hermes_herald_placeholder.py"]
+sources = ["src"]
