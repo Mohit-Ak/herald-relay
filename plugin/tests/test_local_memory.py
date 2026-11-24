@@ -200,12 +200,41 @@ async def test_memory_text_is_never_logged(hermes, fake, caplog):  # noqa: F811
     assert "Leeds" not in caplog.text and "York" not in caplog.text
 
 
-async def test_the_tunnel_answers_it_and_hermes_never_sees_it():
-    import inspect
-    from herald_relay import edge_tunnel, relay_client
-    assert "local_memory.matches(path)" in inspect.getsource(edge_tunnel)
-    src = inspect.getsource(relay_client)
-    assert "local_memory.handle(" in src and "local_memory.matches(path)" in src
+async def test_both_tunnels_answer_memory_requests(hermes, fake, monkeypatch):
+    from herald_relay import edge_tunnel, relay_client, tunnel_cli
+
+    monkeypatch.setattr(tunnel_cli, "HERMES_HOME", fake)
+    monkeypatch.setattr(tunnel_cli, "_hermes_python", lambda: sys.executable)
+    relay = relay_client.HeraldRelayClient("https://relay.example", "tok", hermes)
+    path = "/p/work/_herald/memory"
+    headers = {"Authorization": "Bearer work-key"}
+    relay_replies = []
+    edge_replies = []
+
+    class RelayConnection:
+        async def post(self, url, *, json):
+            assert url == "https://relay.example/tunnel/http_response"
+            relay_replies.append(json)
+
+    class EdgeConnection:
+        closed = False
+
+        async def send_str(self, frame):
+            edge_replies.append(json.loads(frame))
+
+    await relay._forward_one(
+        RelayConnection(), "sse-1", "GET", path, hermes + path, None, False, headers,
+    )
+    assert relay_replies[0]["status"] == 200
+    assert "Works at Acme." in json.dumps(relay_replies[0]["body"])
+
+    edge = edge_tunnel.EdgeTunnel("https://edge.example", "tok", hermes)
+    edge.on_screen = relay.screen_request
+    await edge._serve(EdgeConnection(), {
+        "id": "edge-1", "method": "GET", "path": path, "headers": headers,
+    })
+    assert edge_replies[0]["status"] == 200
+    assert json.loads(edge_replies[1]["data"]) == relay_replies[0]["body"]
 
 
 def _real_hermes_python():

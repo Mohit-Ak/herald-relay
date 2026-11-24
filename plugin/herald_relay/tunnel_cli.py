@@ -2,7 +2,14 @@
 
 This is the ONE command a self-hoster runs on any Linux box::
 
-    pip install hermes-herald
+    python3 -m venv ~/.herald-relay
+    ~/.herald-relay/bin/pip install "git+https://github.com/Mohit-Ak/herald-relay#subdirectory=plugin"
+    ~/.herald-relay/bin/herald-tunnel setup   # register device, write config, install service
+
+Installed anywhere else (Hermes' venv, ``pip --user``), ``setup`` and ``run``
+move it into ``~/.herald-relay`` themselves, because only there can it keep
+itself up to date (migrate.py). Other subcommands::
+
     herald-tunnel setup            # register device, write config, install service
     herald-tunnel run              # or run in the foreground without systemd
     herald-tunnel status           # is the tunnel up, end to end?
@@ -26,6 +33,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -212,6 +220,9 @@ def cmd_setup(args: argparse.Namespace) -> int:
               "api_server platform configured on this machine?", file=sys.stderr)
         return 1
 
+    if _move_before_setup(args):
+        return 0  # not reached: setup re-ran from ~/.herald-relay
+
     existing = _read_yaml_config().get("device_token", "")
     if existing and not args.new_token:
         token = existing
@@ -253,9 +264,50 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _move_before_setup(args: argparse.Namespace, *, reexec=None) -> bool:
+    """Running from a venv Herald doesn't own? Install the owned copy in
+    ~/.herald-relay and run setup from there, so the unit, keepalive and
+    skills name the copy that updates itself. A failure only warns: setup
+    then carries on here, as before."""
+    from . import bridge_update, migrate  # noqa: PLC0415
+    ok, reason = migrate.eligibility(_read_yaml_config(), hermes_home=HERMES_HOME)
+    if not ok:
+        if reason not in ("already_managed", "source_checkout"):
+            print(f"note: Herald Bridge stays where it is ({reason}), so it won't "
+                  "update itself.", file=sys.stderr)
+        return False
+    target = migrate.target_layout()
+    relay_url = (args.relay_url or _read_yaml_config().get("relay_url")
+                 or DEFAULT_RELAY).rstrip("/")
+    print(f"Moving Herald Bridge into {target.root} so it keeps itself up to date…")
+    try:
+        version = asyncio.run(migrate.prepare(
+            target, fetch=lambda: bridge_update.fetch_manifest(relay_url),
+            download=lambda m: bridge_update.download_wheel(target, m)))
+    except Exception as e:  # noqa: BLE001
+        code = getattr(e, "code", type(e).__name__)
+        print(f"WARNING: could not install Herald Bridge into {target.root} ({code}). "
+              "Continuing here; this copy will not update itself.", file=sys.stderr)
+        return False
+    migrate.record(HERMES_HOME, {"from": migrate.from_where(), "to": str(target.root),
+                                 "version": version, "changed": ["setup"], "result": "moved"})
+    print(f"Herald Bridge {version} installed in {target.root}; finishing setup from there.")
+    (reexec or migrate.reexec)(target.root, ["setup", *sys.argv[2:]])
+    return True
+
+
 def _self_exec() -> str:
     """Absolute ExecStart for systemd: the installed console script if it
-    exists (survives shell PATH differences), else `python -m`."""
+    exists (survives shell PATH differences), else `python -m`.
+
+    After a self-update this process runs from a versioned venv
+    (~/.herald-relay-versions/0.8.0); the unit, keepalive and skills must
+    still name the STABLE path (~/.herald-relay), or the next update's swap
+    would not reach them."""
+    from . import bridge_update  # noqa: PLC0415
+    layout = bridge_update.Layout.detect()
+    if layout is not None and layout.bin.exists():
+        return str(layout.bin)
     candidate = Path(sys.executable).parent / "herald-tunnel"
     if candidate.exists():
         return str(candidate)
@@ -282,19 +334,147 @@ def cmd_run(args: argparse.Namespace) -> int:
         logger.info("a tunnel is already running for this machine; not starting another")
         return 0
 
-    logger.info("starting tunnel relay=%s local_hermes=%s api_key=%s",
-                relay_url, local_hermes, "set" if key else "MISSING")
+    from . import bridge_update  # noqa: PLC0415
+    layout = bridge_update.Layout.detect()
+    boot = bridge_update.on_boot(layout)
+    if boot == "rolled_back" and layout is not None:
+        # The version we just swapped in keeps crashing: the previous one is
+        # back in place, so start that instead.
+        lock.close()
+        bridge_update.exec_restart(layout)
+
+    logger.info("starting tunnel relay=%s local_hermes=%s api_key=%s herald_bridge=%s%s",
+                relay_url, local_hermes, "set" if key else "MISSING",
+                bridge_update.current_version(), " (new, on probation)" if boot else "")
     client = HeraldRelayClient(
         relay_url=relay_url,
         device_token=device_token,
         local_hermes_url=local_hermes,
         hermes_key=key,
     )
+    updater = bridge_update.BridgeUpdater(
+        relay_url=relay_url, device_token=device_token, busy=client.busy, cfg=cfg,
+        layout=layout, detect=False, probation=(boot == "probation"),
+        hermes_home=HERMES_HOME)
+    if layout is None:
+        logger.info("Herald Bridge runs from %s, which it can't update%s", sys.prefix,
+                    "; it moves itself into ~/.herald-relay once the tunnel is idle"
+                    if updater.migration else f" ({updater.migration_reason})")
+    client.updater = updater
+    from . import hermes_update  # noqa: PLC0415
+    hermes_updater = hermes_update.HermesUpdater(
+        relay_url=relay_url, device_token=device_token, api_key=key,
+        hermes_home=HERMES_HOME, cfg=cfg, busy=client.busy, local_url=local_hermes,
+        # Herald Cloud machines get Hermes from their image (cloud-ops).
+        cloud=layout is not None and layout.root == Path.home() / ".herald" / "venv")
+    client.hermes_updater = hermes_updater
+
+    async def _main() -> None:
+        updates = asyncio.create_task(updater.run_forever())
+        hermes_updates = asyncio.create_task(hermes_updater.run_forever())
+        try:
+            await client.run_forever()
+        finally:
+            updates.cancel()
+            hermes_updates.cancel()
+
     try:
-        asyncio.run(client.run_forever())
+        asyncio.run(_main())
     except KeyboardInterrupt:
         pass
     return 0
+
+
+def cmd_selfcheck(args: argparse.Namespace) -> int:
+    """Prove this install can start: every module imports. A staged update
+    must pass this before it replaces the running version."""
+    import importlib  # noqa: PLC0415
+    from . import bridge_update  # noqa: PLC0415
+    for mod in ("relay_client", "edge_tunnel", "local_screen", "local_passwords",
+                "local_bridge", "agent_info", "local_skills", "bridge_update", "plugin",
+                "migrate", "hermes_update"):
+        importlib.import_module(f"herald_relay.{mod}")
+    import cryptography.hazmat.primitives.asymmetric.ed25519  # noqa: F401,PLC0415
+    print(json.dumps({"version": bridge_update.current_version()}))
+    return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """Herald Bridge updates itself every few hours; this asks for it now."""
+    from . import bridge_update  # noqa: PLC0415
+    cfg = _read_yaml_config()
+    if args.status:
+        st = bridge_update.load_state()
+        print(json.dumps({"version": bridge_update.current_version(),
+                          "auto_update": not bridge_update.opted_out(cfg)
+                          and bridge_update.Layout.detect() is not None,
+                          "last_result": st.get("last_result"),
+                          "pending": bool(st.get("pending")),
+                          "bad": st.get("bad", {}),
+                          "hermes": _hermes_update_summary()}))
+        return 0
+    if bridge_update.opted_out(cfg):
+        print("Automatic updates are turned off on this computer "
+              "(HERALD_BRIDGE_AUTO_UPDATE=0 or herald.auto_update: false).")
+        return 2
+    layout = bridge_update.Layout.detect()
+    if layout is None:
+        from . import migrate  # noqa: PLC0415
+        ok, reason = migrate.eligibility(cfg, hermes_home=HERMES_HOME, managed=False)
+        if not ok:
+            print("This Herald Bridge was not installed in its own venv "
+                  f"(~/.herald-relay) and can't move there ({reason}), so it "
+                  "can't update itself. Update it with pip.")
+            return 2
+        if not _tunnel_running():
+            return _move_now(cfg)
+    if _tunnel_running():
+        # The running tunnel owns the swap (it knows when nothing is in
+        # flight); it picks this request up within half a minute.
+        path = bridge_update.request_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(int(__import__("time").time())))
+        print("Asked the running tunnel to update now. Check with: "
+              "herald-tunnel update --status")
+        return 0
+    relay_url = (cfg.get("relay_url") or DEFAULT_RELAY).rstrip("/")
+    upd = bridge_update.BridgeUpdater(
+        relay_url=relay_url, device_token=cfg.get("device_token", ""), busy=lambda: False,
+        cfg=cfg, layout=layout, detect=False, restart=lambda _l: None)
+    res = asyncio.run(upd.check_and_apply(force=True))
+    print(json.dumps({"result": res, "version": bridge_update.current_version(),
+                      "target": upd.target}))
+    return 0 if res in ("current", "restarting") else 1
+
+
+def _move_now(cfg: dict) -> int:
+    """`update` with no tunnel running, from a venv Herald doesn't own:
+    install the owned copy and point the launchers at it."""
+    from . import bridge_update, migrate  # noqa: PLC0415
+    target = migrate.target_layout()
+    relay_url = (cfg.get("relay_url") or DEFAULT_RELAY).rstrip("/")
+    try:
+        version = asyncio.run(migrate.prepare(
+            target, fetch=lambda: bridge_update.fetch_manifest(relay_url),
+            download=lambda m: bridge_update.download_wheel(target, m)))
+    except Exception as e:  # noqa: BLE001
+        print(json.dumps({"result": "move_failed", "error": getattr(e, "code", type(e).__name__)}))
+        return 1
+    changed = migrate.repoint_launchers(target.root, hermes_home=HERMES_HOME)
+    migrate.record(HERMES_HOME, {"from": migrate.from_where(), "to": str(target.root),
+                                 "version": version, "changed": changed, "result": "moved"})
+    print(json.dumps({"result": "moved", "version": version, "root": str(target.root),
+                      "changed": changed}))
+    return 0
+
+
+def _hermes_update_summary() -> dict:
+    """What Herald Bridge last did about Hermes itself (hermes_update.py)."""
+    from . import hermes_update  # noqa: PLC0415
+    hs = hermes_update.load_state(hermes_update.state_path(HERMES_HOME))
+    return {"auto_update": not hermes_update.opted_out(_read_yaml_config()),
+            "last_result": hs.get("last_result"), "pending": bool(hs.get("pending")),
+            "halted": hs.get("halted"), "bad": hs.get("bad", {})}
 
 
 def cmd_ensure(args: argparse.Namespace) -> int:
@@ -403,13 +583,89 @@ def _hermes_python() -> str:
     return ""
 
 
+# Runs a helper script under Hermes' own runtime the way Hermes' launcher does:
+# isolated (-I), Hermes' checkout first on sys.path, then hermes_bootstrap,
+# which puts Hermes' managed environment (aiohttp and the rest) on the path.
+#   argv: python -I -c BOOT <hermes checkout> <script> [args...]
+_BOOT = (
+    "import os, sys, runpy\n"
+    "for k in ('PYTHONHOME', 'PYTHONPATH', 'VIRTUAL_ENV'): os.environ.pop(k, None)\n"
+    "root, script = sys.argv[1], sys.argv[2]\n"
+    "sys.argv = [script] + sys.argv[3:]\n"
+    "sys.path.insert(0, root)\n"
+    "try:\n"
+    "    import hermes_bootstrap\n"
+    "except ImportError:\n"
+    "    pass\n"
+    "runpy.run_path(script, run_name='__main__')\n"
+)
+_RUNTIME_ROOT = re.compile(r"sys\.path\.insert\(0,\s*(['\"])(?P<root>[^'\"]+)\1\)")
+_cmd_cache: dict = {"at": 0.0, "cmd": []}
+
+
+def _hermes_launchers() -> list[str]:
+    import shutil  # noqa: PLC0415
+    out = [shutil.which("hermes") or ""]
+    out += [str(c) for c in (Path.home() / ".local/bin/hermes",
+                             Path.home() / ".hermes/hermes-agent/.hermes/bin/hermes",
+                             Path("/usr/local/bin/hermes"))]
+    seen: list[str] = []
+    for c in out:
+        if c and c not in seen and os.access(c, os.X_OK):
+            seen.append(c)
+    return seen
+
+
+def _runtime_command() -> list[str]:
+    """Hermes 0.23+ has no venv: its launcher is a shell script that execs a
+    managed interpreter with Hermes' checkout put on sys.path by hand. Ask the
+    launcher (`--print-runtime-command`, its machine-readable contract) which
+    interpreter and checkout it uses. Empty when the launcher predates it."""
+    import subprocess  # noqa: PLC0415
+    for launcher in _hermes_launchers():
+        try:
+            done = subprocess.run([launcher, "--print-runtime-command"], capture_output=True,
+                                  timeout=20, stdin=subprocess.DEVNULL, check=False)
+            cmd = json.loads(done.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+        except Exception:  # noqa: BLE001  an old launcher runs Hermes and prints help or an error
+            continue
+        if not (isinstance(cmd, list) and cmd and all(isinstance(x, str) for x in cmd)):
+            continue
+        py = cmd[0]
+        m = _RUNTIME_ROOT.search(" ".join(cmd[1:]))
+        if not (m and "python" in Path(py).name and os.access(py, os.X_OK)):
+            continue
+        root = m.group("root")
+        if (Path(root) / "hermes_constants.py").is_file():
+            return [py, "-I", "-c", _BOOT, root]
+    return []
+
+
+def _hermes_command() -> list[str]:
+    """argv prefix that runs a helper script with Hermes' own code importable:
+    `[*prefix, script, *args]`. Empty when Hermes isn't found. Cached for a
+    minute (an update can move the managed interpreter)."""
+    import time  # noqa: PLC0415
+    if os.getenv("HERMES_PYTHON"):
+        return [os.environ["HERMES_PYTHON"]]
+    now = time.monotonic()
+    if _cmd_cache["cmd"] and now - _cmd_cache["at"] < 60:
+        return list(_cmd_cache["cmd"])
+    cmd = _runtime_command()
+    if not cmd:
+        py = _hermes_python()
+        cmd = [py] if py else []
+    _cmd_cache.update(at=now, cmd=cmd)
+    return list(cmd)
+
+
 def cmd_passwords(args: argparse.Namespace) -> int:
-    py = _hermes_python()
-    if not py:
+    cmd = _hermes_command()
+    if not cmd:
         print(json.dumps({"error": "hermes_not_found"}))
         return 2
     prog = Path(__file__).with_name("passwords_import.py")
-    argv = [py, str(prog)]
+    argv = [*cmd, str(prog)]
     if args.action == "count":
         argv.append("--count")
     else:
@@ -450,6 +706,13 @@ def main() -> int:
 
     p_ensure = sub.add_parser("ensure", help="start the tunnel in the background if it is not running")
     p_ensure.set_defaults(func=cmd_ensure)
+
+    p_self = sub.add_parser("selfcheck", help="prove this install can start (used by updates)")
+    p_self.set_defaults(func=cmd_selfcheck)
+
+    p_upd = sub.add_parser("update", help="update Herald Bridge now (it also does this by itself)")
+    p_upd.add_argument("--status", action="store_true", help="show the last update result")
+    p_upd.set_defaults(func=cmd_update)
 
     p_status = sub.add_parser("status", help="check local Hermes, relay, and tunnel")
     p_status.set_defaults(func=cmd_status)

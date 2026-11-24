@@ -54,11 +54,25 @@ async def fake_python(tmp_path, monkeypatch):
             print(st["pipe"], flush=True)
             if st["pipe"] == "ready":
                 time.sleep(30)
+        elif job["op"] == "setup":
+            line = st.get("setup", "started")
+            if line == "started":
+                sd = os.path.join(job["home"], "bot-desktop")
+                os.makedirs(sd, exist_ok=True)
+                f = os.path.join(sd, "herald-setup.json")
+                open(f, "w").write(json.dumps({{"state": "running", "pid": os.getpid(), "at": time.time()}}))
+                print(line, flush=True)
+                time.sleep(float(st.get("setup_s", 0.5)))
+                st.update(installed=True, running=True)
+                open({str(state)!r}, "w").write(json.dumps(st))
+                open(f, "w").write(json.dumps({{"state": "done", "at": time.time()}}))
+            else:
+                print(line, flush=True)
         else:
             if job["op"] == "start":
                 st["running"] = True
                 open({str(state)!r}, "w").write(json.dumps(st))
-            print(json.dumps({{k: st.get(k) for k in ("supported", "installed", "running", "error") if k in st}}), flush=True)
+            print(json.dumps({{k: st.get(k) for k in ("supported", "installed", "running", "error", "can_set_up") if k in st}}), flush=True)
     """))
     monkeypatch.setattr(local_screen, "_PIPE", script)
     for d in (local_screen._pipes, local_screen._control, local_screen._mints):
@@ -86,6 +100,8 @@ def jobs_of(jobs):
 def test_only_our_paths_are_taken():
     assert local_screen.matches("/_herald/screen")
     assert local_screen.matches("/p/work/_herald/screen/enable")
+    assert local_screen.matches("/_herald/screen/setup")
+    assert not local_screen.matches("/_herald/screen/install")
     assert not local_screen.matches("/v1/runs")
     assert not local_screen.matches("/p/work/v1/_herald/screen")
     assert not local_screen.matches("/p/../_herald/screen")
@@ -93,13 +109,14 @@ def test_only_our_paths_are_taken():
 
 async def test_status_for_the_key_holder(hermes, tmp_path, fake_python):
     status, body = await call(hermes, tmp_path, "GET", "/_herald/screen")
-    assert (status, body) == (200, {"available": True, "enabled": True, "enabling": False, "failed": False})
+    assert (status, body) == (200, {"available": True, "enabled": True, "enabling": False, "failed": False,
+                                    "can_set_up": False})
 
 
 @pytest.mark.parametrize("key", [None, "", "wrong", "work-key"])
 async def test_no_key_or_another_profiles_key_gets_nothing(hermes, tmp_path, fake_python, key):
     for method, path in (("GET", "/_herald/screen"), ("POST", "/_herald/screen"),
-                         ("POST", "/_herald/screen/enable")):
+                         ("POST", "/_herald/screen/enable"), ("POST", "/_herald/screen/setup")):
         status, body = await call(hermes, tmp_path, method, path, key=key, body={"mode": "control"})
         assert status == 401 and body["error"] == "agent_key_required"
     assert jobs_of(fake_python[1]) == []          # nothing was even looked at
@@ -191,3 +208,55 @@ async def test_the_edge_transport_never_lends_the_machines_key(hermes, tmp_path,
     await t._serve(Ws(), {"id": "1", "method": "GET", "path": "/_herald/screen", "headers": {}})
     assert seen == [{}]
     assert sent[0]["status"] == 401 and sent[-1] == {"t": "end", "id": "1"}
+
+
+async def test_one_tap_setup_installs_then_the_screen_is_on(hermes, tmp_path, fake_python):
+    """#504: not_installed + password-free sudo -> one tap; the app polls GET."""
+    state, jobs = fake_python
+    state.write_text(json.dumps({"supported": True, "installed": False, "running": False,
+                                 "can_set_up": True, "pipe": "ready", "setup_s": 0.6}))
+    status, body = await call(hermes, tmp_path, "GET", "/_herald/screen")
+    assert body["reason"] == "not_installed" and body["can_set_up"] is True
+    status, body = await call(hermes, tmp_path, "POST", "/_herald/screen/setup")
+    assert status == 200 and body["enabling"] is True and body["enabled"] is False
+    # A second tap while it runs doesn't start another install.
+    await call(hermes, tmp_path, "POST", "/_herald/screen/setup")
+    assert sum(1 for j in jobs_of(jobs) if j["op"] == "setup") == 1
+    await asyncio.sleep(1.2)
+    status, body = await call(hermes, tmp_path, "GET", "/_herald/screen")
+    assert body["enabled"] is True and body["enabling"] is False and "reason" not in body
+
+
+async def test_setup_where_sudo_wants_a_password_says_so(hermes, tmp_path, fake_python):
+    fake_python[0].write_text(json.dumps({"supported": True, "installed": False, "running": False,
+                                          "can_set_up": False, "setup": "error needs_password"}))
+    status, body = await call(hermes, tmp_path, "GET", "/_herald/screen")
+    assert body["can_set_up"] is False
+    status, body = await call(hermes, tmp_path, "POST", "/_herald/screen/setup")
+    assert status == 409 and body["error"] == "needs_password"
+
+
+async def test_a_failed_or_dead_setup_is_reported_with_its_reason(hermes, tmp_path, fake_python):
+    fake_python[0].write_text(json.dumps({"supported": True, "installed": False, "running": False,
+                                          "can_set_up": True}))
+    sd = tmp_path / "home/bot-desktop"
+    sd.mkdir(parents=True)
+    (sd / "herald-setup.json").write_text(json.dumps(
+        {"state": "failed", "code": "install_failed", "message": "Installing the screen didn't finish: E: dpkg"}))
+    _, body = await call(hermes, tmp_path, "GET", "/_herald/screen")
+    assert body["failed"] is True and body["message"].startswith("Installing the screen didn't finish")
+    # A helper that died mid-install (pid gone) isn't "still setting up" forever.
+    (sd / "herald-setup.json").write_text(json.dumps({"state": "running", "pid": 2 ** 22 + 7,
+                                                      "at": __import__("time").time()}))
+    _, body = await call(hermes, tmp_path, "GET", "/_herald/screen")
+    assert body["enabling"] is False and body["failed"] is True
+
+
+async def test_hermes_command_may_be_an_argv_prefix(hermes, tmp_path, fake_python):
+    """Hermes 0.23+ runs helpers as `python -I -c BOOT <checkout> <script>`."""
+    status, body = await local_screen.handle(
+        "GET", "/_herald/screen", {"Authorization": "Bearer default-key"}, None, hermes_url=hermes,
+        relay_url="https://relay.example", device_token="tok-0123456789abcdef",
+        hermes_home=tmp_path / "home", hermes_python=[sys.executable, "-I"])
+    assert status == 200 and body["enabled"] is True
+    assert local_screen.argv_of("") == [] and local_screen.argv_of("/py") == ["/py"]

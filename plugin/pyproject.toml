@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-herald"
-version = "0.7.0"
+version = "0.9.3"
 description = "Herald Relay plugin for Hermes — voice-first AI on mobile"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,6 +16,9 @@ dependencies = [
     # Hermes installs always have PyYAML, but `pip install hermes-herald` on a
     # bare box must not fail at `herald-tunnel setup` with ModuleNotFoundError.
     "pyyaml>=6.0",
+    # bridge_update.py: Ed25519 check of the signed release manifest before
+    # Herald Bridge installs an update of itself (herald#505).
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]

@@ -1,6 +1,7 @@
 """Local agents get the herald-cards skill: how and when to show cards in the
 Herald app, owned by the agent (not injected per run by Herald). The text is
 the same as the cloud copy in herald's backend/cloud/skills/herald-cards."""
+import os
 import sys
 from pathlib import Path
 
@@ -16,6 +17,8 @@ def test_cards_skill_is_installed(tmp_path):
     text = (tmp_path / "skills/herald/herald-cards/SKILL.md").read_text()
     assert text.startswith("---\nname: herald-cards\n")
     assert text == local_skills.CARDS_SKILL
+    mail = (tmp_path / "skills/herald/herald-cards/references/mail.md").read_text()
+    assert "Never turn Gmail API IDs into links" in mail
 
 
 def test_cards_skill_says_when_where_and_how():
@@ -41,7 +44,8 @@ def test_plugin_version_announces_the_skill():
 
 def test_matches_the_cloud_copy():
     """Only where a herald checkout sits next to this one (not in CI)."""
-    cloud = Path.home() / "projects/herald/backend/cloud/skills/herald-cards/SKILL.md"
+    herald = Path(os.environ.get("HERALD_REPO", Path.home() / "projects/herald"))
+    cloud = herald / "backend/cloud/skills/herald-cards/SKILL.md"
     if not cloud.exists():
         pytest.skip("herald checkout (with the skill) not here")
     assert cloud.read_text() == local_skills.CARDS_SKILL

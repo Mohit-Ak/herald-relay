@@ -187,7 +187,11 @@ def test_plugin_ignores_non_auth_forwarded_headers():
 
 
 def test_plugin_forward_request_passes_headers_through(monkeypatch):
-    """_handle_forward_request must actually read payload['headers']."""
+    """_handle_forward_request must actually read payload['headers'].
+
+    Uses a plain proxied path: /api/soul and /v1/skills are answered by the
+    tunnel itself since herald#490 (see the agent_info test below).
+    """
     import asyncio
 
     c = _client()
@@ -213,9 +217,53 @@ def test_plugin_forward_request_passes_headers_through(monkeypatch):
             {
                 "request_id": "r1",
                 "method": "GET",
+                "path": "/p/dobbo/v1/models",
+                "headers": {"Authorization": "Bearer dobbo-profile-key"},
+            },
+        )
+    )
+    assert captured["headers"]["Authorization"] == "Bearer dobbo-profile-key"
+
+
+def test_plugin_agent_info_path_passes_headers_through(monkeypatch):
+    """/p/<name>/api/soul goes to agent_info.handle with the caller's key."""
+    import asyncio
+
+    from herald_relay import agent_info
+
+    c = _client()
+    captured: dict = {}
+
+    async def fake_handle(method, path, headers, body, **kw):
+        captured["path"] = path
+        captured["headers"] = headers
+        return 200, {"name": "Dobbo"}
+
+    monkeypatch.setattr(agent_info, "handle", fake_handle)
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"ok": True}
+
+    class FakeClient:
+        async def request(self, method, url, **kw):
+            raise AssertionError("agent_info paths must not be proxied raw")
+
+        async def post(self, *a, **kw):
+            return FakeResp()
+
+    asyncio.run(
+        c._handle_forward_request(
+            FakeClient(),
+            {
+                "request_id": "r1",
+                "method": "GET",
                 "path": "/p/dobbo/api/soul",
                 "headers": {"Authorization": "Bearer dobbo-profile-key"},
             },
         )
     )
+    assert captured["path"] == "/p/dobbo/api/soul"
     assert captured["headers"]["Authorization"] == "Bearer dobbo-profile-key"

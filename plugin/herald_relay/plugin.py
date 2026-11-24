@@ -42,14 +42,17 @@ class HeraldRelayPlugin:
         """Initialise the plugin from Hermes config.
 
         Config keys:
-            relay_url (str): Herald Cloud base URL  (https://relay.herald.app).
+            relay_url (str): Herald relay base URL
+                (default https://herald-api.eventhorizonlabs.xyz).
             device_token (str): Push token from the Herald mobile app. Falls back
                 to the ``HERALD_DEVICE_TOKEN`` environment variable.
             hermes_version (str): Version string sent to Cloud on connect.
         """
         self.relay_url: str = config.get(
             "relay_url",
-            os.getenv("HERALD_RELAY_URL", "https://relay.herald.app"),
+            # relay.herald.app never existed; this is the live relay, the
+            # same default `herald-tunnel setup` writes (tunnel_cli.DEFAULT_RELAY).
+            os.getenv("HERALD_RELAY_URL", "https://herald-api.eventhorizonlabs.xyz"),
         )
         self.device_token: str | None = config.get(
             "device_token", os.getenv("HERALD_DEVICE_TOKEN")
