@@ -141,7 +141,7 @@ from this tunnel (`herald_relay/local_files.py`), never from a public link:
   screenshots) and the user's own temp files. Credentials by name (`id_rsa`, `*.pem`,
   `credentials.json`, `.env*`, …) and anything that starts like a private key are refused
   everywhere. `HERALD_FILE_ROOTS` (os.pathsep list) replaces the home folder.
-- Files over 50 MB (`HERALD_FILE_MAX_MB`) are not sent; the app says how big the file is.
+- By default, files over 200 MiB are not sent (`HERALD_FILE_MAX_MB`); the app says how big the file is.
 - Logs carry status and byte counts, never a path.
 
 ## Architecture
