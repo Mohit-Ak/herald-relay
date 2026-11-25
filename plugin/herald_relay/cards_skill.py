@@ -37,9 +37,10 @@ Add one, unasked, when your reply has:
 * options to choose from (buttons)
 * something to copy or keep (a drafted message, an address, specs)
 
-No card for small talk, one-line facts ("what time is it"), yes/no answers,
-a question back to the user, or any reply that is a sentence or two. At most
-one card per message. Use real values only; never invent data to fill a card.
+No card for small talk, one-line facts ("what time is it"), or a question
+without choices. A brief spoken answer can still have a useful card: a
+confirmed booking, a draft, or a result with things to open or check.
+Use one card for the main job. Use real values only.
 
 ## Cards are never read aloud
 
@@ -56,8 +57,16 @@ that for real milestones, not every step.
 
 ## Templates first
 
-Herald has a library of tested card designs. **Use a template whenever one
-fits**: you send the data, the app draws a polished card.
+Herald has a library of tested card designs. Pick the one that best helps
+the user act or scan rather than sending a row of links:
+
+- Composed or sent email: `mail.draft`. A day of meetings: `calendar.day`.
+- Alternatives: `decision.compare`; a plan to follow: `task.checklist`.
+- Finished work: `task.done`; failed work: `task.failed`.
+- Search results: `search.results`, or the specific template for places,
+  products, flights or files. Use `sources.list` for citations only.
+- A link with useful known context: `link.card`. A standalone sign-in or
+  verification link: `herald-links`. Do not use both for the same action.
 
 1. Pick the template from the index below.
 2. Load its category's reference for the fields and an example:
@@ -177,7 +186,7 @@ plain card, so never send the same card twice.
 - `calc.result` a calculation or unit conversion with its working; needs expression, result
 - `data.table` any table of results; needs title, columns, rows
 - `howto.steps` step-by-step instructions; needs title, steps
-- `link.card` one link: title, site, what it is, open; needs title, url
+- `link.card` one resource with known context: what opens, the site, a useful description, and a short action. Use herald-links for sign-in or verification; needs title, url
 - `news.headlines` news headlines with source and time; needs items
 - `news.story` one story summarised, with sources; needs headline, summary, sources
 - `recipe.card` a recipe: ingredients, steps, time, servings; needs name, ingredients, steps
@@ -1947,7 +1956,7 @@ Fields:
 
 ## link.card (Link)
 
-Use for one link: title, site, what it is, open.
+Use for one resource with known context: what opens, the site, a useful description, and a short action. Use herald-links for sign-in or verification.
 
 Fields:
 
@@ -1955,11 +1964,12 @@ Fields:
 - url*: text ≤500
 - domain: text ≤60
 - description: text ≤300
+- action: one of open|read|view|download
 - image: text ≤600
 - image_alt: text ≤100
 
 ```herald-ui
-{"template":"link.card@1","speech":"I've put the link to A2UI basic catalog guide in the chat.","data":{"title":"A2UI basic catalog guide","url":"https://a2ui.org/specification/v0.9.1-basic-catalog-implementation-guide/","domain":"a2ui.org","description":"How to implement the basic component catalog in a renderer."}}
+{"template":"link.card@1","speech":"I've put the link to A2UI basic catalog guide in the chat.","data":{"title":"A2UI basic catalog guide","url":"https://a2ui.org/specification/v0.9.1-basic-catalog-implementation-guide/","domain":"a2ui.org","description":"How to implement the basic component catalog in a renderer.","action":"read"}}
 ```
 
 ## news.headlines (Headlines)
