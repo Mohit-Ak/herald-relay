@@ -15,7 +15,9 @@ def run(job: dict) -> dict:
         from hermes_cli.config import load_config
         from hermes_cli.config_backend import ConfigLockedError
         from hermes_cli.inventory import build_model_options_payload, load_picker_context
-        from hermes_cli.model_assignment import ModelAssignmentRejected, validated_main_model_selection
+        from hermes_cli.model_assignment import (
+            BARE_CUSTOM_SELECTORS, ModelAssignmentRejected, validated_main_model_selection,
+        )
         from hermes_cli.model_switch import persist_model_selection
     except ImportError:
         return {"error": "unsupported"}
@@ -36,7 +38,18 @@ def run(job: dict) -> dict:
         if not requested_provider and len(set(providers)) > 1 and ctx.current_provider not in providers:
             return {"error": "invalid_model"}
         try:
-            selection = validated_main_model_selection(load_config(), provider, model)
+            cfg = load_config()
+            current = cfg.get("model")
+            trusted_route = {}
+            if provider == ctx.current_provider and provider in BARE_CUSTOM_SELECTORS and isinstance(current, dict):
+                # The canonical assignment API needs the current endpoint
+                # for a bare custom selector; it must come from Hermes.
+                trusted_route = {
+                    "base_url": str(current.get("base_url") or ""),
+                    "api_key": str(current.get("api_key") or current.get("api") or ""),
+                    "explicit_endpoint": False,
+                }
+            selection = validated_main_model_selection(cfg, provider, model, **trusted_route)
             persist_model_selection(selection)
         except ModelAssignmentRejected:
             return {"error": "invalid_model"}

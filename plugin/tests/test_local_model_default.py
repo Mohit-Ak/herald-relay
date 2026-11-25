@@ -82,6 +82,7 @@ def hermes_runtime(monkeypatch):
         },
         "model_assignment": {
             "ModelAssignmentRejected": type("Rejected", (Exception,), {}),
+            "BARE_CUSTOM_SELECTORS": frozenset({"custom", "local"}),
             "validated_main_model_selection": lambda cfg, provider, model: (provider, model),
         },
         "model_switch": {"persist_model_selection": persist},
@@ -109,3 +110,31 @@ def test_helper_only_writes_a_configured_choice_through_hermes(hermes_runtime):
         "can_set_default": True, "model": "m2", "provider": "cp",
     }
     assert recorded == [("cp", "m2")]
+
+
+def test_helper_keeps_the_installed_bare_custom_endpoint(hermes_runtime, monkeypatch):
+    import sys
+
+    ctx, recorded = hermes_runtime
+    ctx.current_provider = "custom"
+    inventory = sys.modules["hermes_cli.inventory"]
+    inventory.build_model_options_payload = lambda _, *, include_unconfigured: {
+        "providers": [{"slug": "custom", "models": ["m1", "m2"]}],
+    }
+    cfg = {"model": {"provider": "custom", "default": "m1",
+                     "base_url": "https://configured.example/v1", "api_key": "fixture"}}
+    sys.modules["hermes_cli.config"].load_config = lambda: cfg
+    validator = sys.modules["hermes_cli.model_assignment"]
+
+    def validate(config, provider, model, **trusted):
+        assert config is cfg
+        assert trusted == {
+            "base_url": "https://configured.example/v1", "api_key": "fixture",
+            "explicit_endpoint": False,
+        }
+        return provider, model
+
+    monkeypatch.setattr(validator, "validated_main_model_selection", validate)
+    result = model_default_helper.run({"action": "set", "model": "m2", "provider": "custom"})
+    assert result == {"can_set_default": True, "model": "m2", "provider": "custom"}
+    assert recorded == [("custom", "m2")]
