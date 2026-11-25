@@ -343,6 +343,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         lock.close()
         bridge_update.exec_restart(layout)
 
+    from . import local_skills  # noqa: PLC0415
+    local_skills.sync_on_startup(HERMES_HOME, command=_self_exec())
+
     logger.info("starting tunnel relay=%s local_hermes=%s api_key=%s herald_bridge=%s%s",
                 relay_url, local_hermes, "set" if key else "MISSING",
                 bridge_update.current_version(), " (new, on probation)" if boot else "")

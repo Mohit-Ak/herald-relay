@@ -297,3 +297,23 @@ def install(hermes_home: Path, command: str = "herald-tunnel",
                 raise
         first = False
     return written
+
+
+
+def sync_on_startup(hermes_home: Path, *, command: str) -> None:
+    """Refresh bundled skills after an upgrade, not on every restart."""
+    from . import __version__  # noqa: PLC0415
+
+    for home in homes(hermes_home):
+        stamp = home / "skills" / "herald" / ".bridge-version"
+        try:
+            if stamp.exists() and stamp.read_text(encoding="utf-8") == __version__:
+                continue
+            install(home, command=command)
+            temporary_stamp = stamp.with_suffix(".tmp")
+            temporary_stamp.write_text(__version__, encoding="utf-8")
+            os.replace(temporary_stamp, stamp)
+        except (OSError, UnicodeError):
+            # Running the relay is more important than an unwritable skill.
+            # Without the new version stamp, the next startup can retry.
+            continue

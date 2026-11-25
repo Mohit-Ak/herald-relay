@@ -49,3 +49,23 @@ def test_matches_the_cloud_copy():
     if not cloud.exists():
         pytest.skip("herald checkout (with the skill) not here")
     assert cloud.read_text() == local_skills.CARDS_SKILL
+
+
+
+def test_startup_refreshes_bundled_skills_once_per_bridge_version(tmp_path, monkeypatch):
+    home = tmp_path / "profiles" / "qa"
+    local_skills.install(home)
+    installed = home / "skills/herald/herald-cards/SKILL.md"
+    installed.write_text("old bundled copy", encoding="utf-8")
+
+    local_skills.sync_on_startup(tmp_path, command="herald-tunnel")
+    assert installed.read_text() == local_skills.CARDS_SKILL
+    assert (tmp_path / "skills/herald/herald-cards/SKILL.md").is_file()
+
+    installed.write_text("edited after the upgrade", encoding="utf-8")
+    local_skills.sync_on_startup(tmp_path, command="herald-tunnel")
+    assert installed.read_text() == "edited after the upgrade"
+
+    monkeypatch.setattr(herald_relay, "__version__", "0.0.1")
+    local_skills.sync_on_startup(tmp_path, command="herald-tunnel")
+    assert installed.read_text() == local_skills.CARDS_SKILL
