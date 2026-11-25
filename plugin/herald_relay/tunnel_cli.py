@@ -392,7 +392,8 @@ def cmd_selfcheck(args: argparse.Namespace) -> int:
     from . import bridge_update  # noqa: PLC0415
     for mod in ("relay_client", "edge_tunnel", "local_screen", "local_passwords",
                 "local_bridge", "agent_info", "local_skills", "bridge_update", "plugin",
-                "migrate", "hermes_update", "secure_entry", "secure_entry_cli"):
+                "migrate", "hermes_update", "secure_entry", "secure_entry_cli",
+                "local_model_default", "model_default_helper"):
         importlib.import_module(f"herald_relay.{mod}")
     import cryptography.hazmat.primitives.asymmetric.ed25519  # noqa: F401,PLC0415
     print(json.dumps({"version": bridge_update.current_version()}))
