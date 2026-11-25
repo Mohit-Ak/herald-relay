@@ -132,6 +132,21 @@ async def test_piece_length_is_capped(hermes, box):
     assert s == 200 and len(base64.b64decode(b["b64"])) == local_files.CHUNK_MAX and not b["eof"]
 
 
+async def test_typical_release_apk_keeps_the_same_small_chunks(hermes, box):
+    if "HERALD_FILE_MAX_MB" in os.environ:
+        pytest.skip("uses the default attachment limit")
+    home, hh, _ = box
+    package = home / "release.apk"
+    with package.open("wb") as f:
+        f.truncate(100 * 1024 * 1024)
+    status, info = await call(hermes, hh, q(package, info=1))
+    assert status == 200 and info["size"] == 100 * 1024 * 1024
+    assert info["max_bytes"] == 200 * 1024 * 1024
+    status, piece = await call(hermes, hh, q(package, offset=0, length=10 * local_files.CHUNK_MAX))
+    assert status == 200 and len(base64.b64decode(piece["b64"])) == local_files.CHUNK_MAX
+    assert not piece["eof"]
+
+
 async def test_changed_file_is_refused_mid_download(hermes, box):
     home, hh, _ = box
     f = home / "a.txt"

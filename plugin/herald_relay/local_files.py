@@ -56,7 +56,7 @@ _ROUTE = re.compile(r"^(?:/p/(?P<profile>[A-Za-z0-9][A-Za-z0-9_.-]{0,63}))?/_her
 
 # Largest file the phone may download. Above it the app says how big the file
 # is and where it is, instead of trying.
-MAX_FILE_BYTES = int(float(os.getenv("HERALD_FILE_MAX_MB", "50")) * 1024 * 1024)
+MAX_FILE_BYTES = int(float(os.getenv("HERALD_FILE_MAX_MB", "200")) * 1024 * 1024)
 CHUNK_DEFAULT = 1024 * 1024
 # 2 MiB -> ~2.7 MB of base64: well inside the relay's 10 MB request cap and
 # the edge's message size, with room to spare.
