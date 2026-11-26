@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import sys
 import time
 from pathlib import Path
 
@@ -157,15 +158,17 @@ def test_releases_still_built_as_hermes_herald():
     assert 'name = "hermes-herald"' in text
 
 
-def test_current_version_found_under_either_name(monkeypatch):
+def test_current_version_is_running_code_after_stable_path_moves(monkeypatch):
     import importlib.metadata as md
+    import herald_relay
 
     def fake(name):
-        if name == "herald-bridge":
-            return "1.2.3"
+        if name == "hermes-herald":
+            return NEW  # Metadata now points at the newly installed venv.
         raise md.PackageNotFoundError(name)
+
     monkeypatch.setattr(md, "version", fake)
-    assert bu.current_version() == "1.2.3"
+    assert bu.current_version() == herald_relay.__version__
 
 
 def test_current_version_mixed_install_reports_running_code(monkeypatch):
@@ -353,6 +356,84 @@ def test_update_swaps_and_restarts_when_idle(tmp_path, fast):
     assert Path(p["from_path"], "VERSION").read_text() == CUR
 
 
+def test_stale_peer_adopts_signed_active_install_without_restaging(tmp_path, fast):
+    busy = {"on": True}
+    rig = Rig(tmp_path, busy=lambda: busy["on"])
+    shared_target = _venv(rig.lay.versions / NEW, NEW)
+    bu.swap(rig.lay, shared_target, from_version=CUR)
+
+    async def should_not_download(_):
+        pytest.fail("The update already installed for the other profile is active")
+
+    rig.u._download = should_not_download
+
+    async def go():
+        update = asyncio.create_task(rig.u.check_and_apply())
+        await asyncio.sleep(0.1)
+        assert rig.u.state == "waiting_idle"
+        assert rig.restarts == []
+        busy["on"] = False
+        return await asyncio.wait_for(update, 2)
+
+    assert asyncio.run(go()) == "restarting"
+    assert rig.restarts == [rig.lay]
+    assert not bu.load_state(rig.state).get("pending")
+
+
+def test_stale_peer_does_not_adopt_active_install_outside_rollout(tmp_path, fast):
+    rig = Rig(tmp_path, env=sign(manifest(rollout_percent=0)))
+    bu.swap(rig.lay, _venv(rig.lay.versions / NEW, NEW), from_version=CUR)
+    assert asyncio.run(rig.u.check_and_apply()) == "not_in_rollout"
+    assert rig.restarts == []
+
+
+def test_concurrent_profiles_download_and_stage_shared_release_once(tmp_path, fast):
+    first, second = Rig(tmp_path), Rig(tmp_path)
+    second.u.state_file = tmp_path / "second-state.json"
+    downloads = []
+
+    async def run():
+        downloading = asyncio.Event()
+        continue_download = asyncio.Event()
+
+        async def download(m):
+            downloads.append(m["version"])
+            downloading.set()
+            await continue_download.wait()
+            return tmp_path / m["wheel_name"]
+
+        first.u._download = second.u._download = download
+        starting = asyncio.create_task(first.u.check_and_apply())
+        await asyncio.wait_for(downloading.wait(), 2)
+        joining = asyncio.create_task(second.u.check_and_apply())
+        await asyncio.sleep(0)
+        continue_download.set()
+        return await asyncio.wait_for(asyncio.gather(starting, joining), 2)
+
+    assert asyncio.run(run()) == ["restarting", "restarting"]
+    assert downloads == [NEW]
+    assert bu.load_state(first.state)["pending"]["to_version"] == NEW
+    assert not bu.load_state(second.u.state_file).get("pending")
+
+
+def test_busy_profile_does_not_hold_shared_install_lock(tmp_path, fast):
+    busy, idle = Rig(tmp_path, busy=lambda: True), Rig(tmp_path)
+    idle.u.state_file = tmp_path / "idle-state.json"
+
+    async def run():
+        waiting = asyncio.create_task(busy.u.check_and_apply())
+        try:
+            await asyncio.sleep(0)
+            assert busy.u.state == "waiting_idle"
+            assert await asyncio.wait_for(idle.u.check_and_apply(), 2) == "restarting"
+            assert busy.restarts == []
+        finally:
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+
+    asyncio.run(run())
+
+
 def test_no_restart_while_a_run_is_in_flight(tmp_path, fast):
     busy = {"on": True}
     rig = Rig(tmp_path, busy=lambda: busy["on"])
@@ -451,9 +532,31 @@ def test_registering_commits_and_prunes(tmp_path, fast):
     u2.on_registered({"ok": True})
     st = bu.load_state(rig.state)
     assert "pending" not in st and st["last_result"].startswith("updated:")
-    assert not old.exists()                                   # pruned
+    assert old.exists() is (not Path("/proc/self/cmdline").is_file())
     assert (rig.lay.versions / NEW).exists()                  # current kept
     assert (rig.lay.versions / f"{CUR}-original").exists()    # rollback target kept
+
+
+@pytest.mark.skipif(not Path("/proc/self/cmdline").is_file(), reason="Linux process paths")
+def test_prune_retains_the_venv_of_a_live_sibling_process(tmp_path):
+    layout = bu.Layout(tmp_path / ".herald-relay", tmp_path / ".herald-relay-versions")
+    old = _venv(layout.versions / "0.9.4", "0.9.4")
+    previous = _venv(layout.versions / "0.9.6", "0.9.6")
+    current = _venv(layout.versions / "0.9.7", "0.9.7")
+    unused = _venv(layout.versions / "0.9.3", "0.9.3")
+    layout.root.symlink_to(current)
+    python = old / "bin" / "python"
+    python.symlink_to(sys.executable)
+    script = "import sys; sys.stdin.read(); print(open(sys.argv[1]).read())"
+    with subprocess.Popen([str(python), "-c", script, str(old / "VERSION")],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as sibling:
+        bu.prune(layout, {layout.root, previous})
+        output, _ = sibling.communicate("", timeout=3)
+        assert sibling.returncode == 0 and output.strip() == "0.9.4"
+
+    assert not unused.exists()
+    bu.prune(layout, {layout.root, previous})
+    assert not old.exists()
 
 
 def test_probation_rolls_back_when_relay_is_up_but_we_cannot_register(tmp_path, fast):
