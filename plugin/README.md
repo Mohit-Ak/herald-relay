@@ -4,6 +4,8 @@ Connect your local Hermes AI agent to Herald — voice-first conversations on mo
 
 Full guide: <https://heraldbridge.dev/docs/setup>.
 
+For missed callbacks and other app problems, use **Menu → Report a problem** in Herald Bridge or the [Herald support page](https://heraldbridge.dev/docs/support). For Bridge code or installation bugs, use the [official Bridge tracker](https://github.com/Mohit-Ak/herald-relay/issues), not a repository inferred from the legacy `hermes-herald` distribution name. Keep pairing links, keys, and private notification URLs out of public issues.
+
 ## Install (it keeps itself up to date)
 
 Install into its own venv at `~/.herald-relay`, the only place Herald Bridge can

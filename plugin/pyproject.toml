@@ -31,8 +31,10 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 herald-tunnel = "herald_relay.tunnel_cli:main"
 
 [project.urls]
-"Homepage" = "https://herald.app"
+"Homepage" = "https://heraldbridge.dev"
 "Repository" = "https://github.com/Mohit-Ak/herald-relay"
+"Issues" = "https://github.com/Mohit-Ak/herald-relay/issues"
+"Support" = "https://heraldbridge.dev/docs/support"
 
 # Hermes discovers pip-installed plugins via the `hermes_agent.plugins` entry
 # point group (hermes_cli/plugins.py: ENTRY_POINTS_GROUP). The old

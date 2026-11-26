@@ -10,6 +10,13 @@ Herald Relay is the SaaS backend that makes Herald work anywhere. Hermes runs on
 
 ---
 
+## Report a problem
+
+- **Voice calls, missed callbacks, and app problems:** use **Menu → Report a problem** in Herald Bridge. It sends the report privately to Herald support and gives you a report ID. If you can't open the app, use the [Herald support page](https://heraldbridge.dev/docs/support).
+- **Bridge code or installation bugs:** use [this repository's issue tracker](https://github.com/Mohit-Ak/herald-relay/issues). Don't include pairing links, keys, private notification URLs, or private transcripts in a public issue.
+
+Older signed installs can appear as `hermes-herald` in Python package metadata. That is a legacy distribution name, not a GitHub repository name. The public package is [`herald-bridge`](https://pypi.org/project/herald-bridge/), and its source is [`Mohit-Ak/herald-relay`](https://github.com/Mohit-Ak/herald-relay).
+
 ## Architecture
 
 ```
@@ -38,7 +45,7 @@ Herald Relay is the SaaS backend that makes Herald work anywhere. Hermes runs on
                │ SSE tunnel (httpx, reconnect with backoff)
                ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  hermes-herald plugin (Python, runs with Hermes)             │
+│  Herald Bridge plugin (Python, runs with Hermes)             │
 │  ├─ HeraldRelayClient — SSE subscriber + POST update sender  │
 │  ├─ EventClassifier   — 5-tier: IGNORE/ACCUM/MILESTONE/Q/DONE│
 │  └─ HeraldRelayPlugin — Hermes plugin entrypoint             │
