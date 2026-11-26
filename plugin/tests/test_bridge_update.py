@@ -158,15 +158,17 @@ def test_releases_still_built_as_hermes_herald():
     assert 'name = "hermes-herald"' in text
 
 
-def test_current_version_found_under_either_name(monkeypatch):
+def test_current_version_is_running_code_after_stable_path_moves(monkeypatch):
     import importlib.metadata as md
+    import herald_relay
 
     def fake(name):
-        if name == "herald-bridge":
-            return "1.2.3"
+        if name == "hermes-herald":
+            return NEW  # Metadata now points at the newly installed venv.
         raise md.PackageNotFoundError(name)
+
     monkeypatch.setattr(md, "version", fake)
-    assert bu.current_version() == "1.2.3"
+    assert bu.current_version() == herald_relay.__version__
 
 
 def test_current_version_mixed_install_reports_running_code(monkeypatch):
@@ -412,6 +414,24 @@ def test_concurrent_profiles_download_and_stage_shared_release_once(tmp_path, fa
     assert downloads == [NEW]
     assert bu.load_state(first.state)["pending"]["to_version"] == NEW
     assert not bu.load_state(second.u.state_file).get("pending")
+
+
+def test_busy_profile_does_not_hold_shared_install_lock(tmp_path, fast):
+    busy, idle = Rig(tmp_path, busy=lambda: True), Rig(tmp_path)
+    idle.u.state_file = tmp_path / "idle-state.json"
+
+    async def run():
+        waiting = asyncio.create_task(busy.u.check_and_apply())
+        try:
+            await asyncio.sleep(0)
+            assert busy.u.state == "waiting_idle"
+            assert await asyncio.wait_for(idle.u.check_and_apply(), 2) == "restarting"
+            assert busy.restarts == []
+        finally:
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+
+    asyncio.run(run())
 
 
 def test_no_restart_while_a_run_is_in_flight(tmp_path, fast):

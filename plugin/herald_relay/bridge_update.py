@@ -104,27 +104,13 @@ class UpdateError(Exception):
 # ── versions ─────────────────────────────────────────────────────────────────
 
 def current_version() -> str:
-    """Version of the code that is running.
+    """Report the imported code, even after a peer redirects the venv path.
 
-    Normally exactly one of PACKAGES is installed. A venv can hold both when
-    `pip install herald-bridge` lands on top of an older `hermes-herald` (or the
-    reverse): pip overwrites the shared herald_relay files but keeps both
-    metadata records. Trusting the first name found then reports the stale
-    version (seen: 0.8.1 reported while 0.9.0 ran), so the fleet view is wrong
-    and the updater reinstalls a release it already runs. With more than one
-    record, the package's own __version__ (the files actually imported) wins.
+    Installation metadata can belong to a previous distribution name or to
+    the new venv now sitting at this process's original stable path.
     """
-    from importlib.metadata import version  # noqa: PLC0415
     from herald_relay import __version__  # noqa: PLC0415
-    found = []
-    for name in PACKAGES:  # hermes-herald, or herald-bridge after the rename
-        try:
-            found.append(version(name))
-        except Exception:  # noqa: BLE001  (PackageNotFoundError: try the other name)
-            continue
-    if len(found) == 1:
-        return found[0]
-    return __version__  # none (a source checkout) or both (mixed install)
+    return __version__
 
 
 def vtuple(v: str) -> tuple[int, ...]:
@@ -812,17 +798,21 @@ class BridgeUpdater:
             return "not_in_rollout"
         assert self.layout is not None
         self.target = m["version"]
-        async with _hold_update_lock(self.layout):
-            return await self._activate_signed_release(self.layout, m, cur)
+        while True:
+            # Don't hold the shared layout hostage to this profile's
+            # active work: another profile can install while we're busy.
+            self.state = "waiting_idle"
+            await self.wait_idle()
+            async with _hold_update_lock(self.layout):
+                if not self.busy():
+                    return await self._activate_signed_release(self.layout, m, cur)
 
     async def _activate_signed_release(self, layout: Layout, m: dict, cur: str) -> str:
         target = layout.versions / m["version"]
         if layout.root.is_symlink() and layout.root.resolve() == target.resolve():
             # Another profile already staged this verified release. Rejoin
             # the stable path when idle rather than trying to install over it.
-            self.state = "waiting_idle"
-            await self.wait_idle()
-            if layout.root.resolve() != target.resolve() or not target.is_dir():
+            if not target.is_dir():
                 raise UpdateError("shared_install_changed")
             self.state = "restarting"
             self._record(f"restarting_shared:{cur}->{m['version']}")
