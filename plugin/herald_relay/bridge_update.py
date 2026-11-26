@@ -52,6 +52,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
@@ -405,19 +406,71 @@ def swap(layout: Layout, target: Path, *, from_version: Optional[str] = None) ->
     return previous
 
 
-def prune(layout: Layout, keep: set[Path]) -> None:
-    """Drop installed versions other than *keep* (current + previous)."""
-    keep_real = {Path(os.path.realpath(k)) for k in keep}
+def _running_versions(layout: Layout) -> Optional[set[Path]]:
+    """Find older environments still used by this account's processes."""
+    proc = Path("/proc")
+    if not (proc / "self" / "cmdline").is_file():
+        return None  # No reliable process-path inspection on this system.
+    versions = layout.versions.resolve()
+    active = set()
     try:
-        children = list(layout.versions.iterdir())
+        for pid in proc.iterdir():
+            if not pid.name.isdecimal():
+                continue
+            try:
+                if pid.stat().st_uid != os.getuid():
+                    continue
+                with (pid / "cmdline").open("rb") as command:
+                    launcher = Path(os.fsdecode(command.read(4096).split(b"\0", 1)[0]))
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # It exited during the scan.
+            if launcher.is_absolute() and launcher.parent.name == "bin":
+                # Resolve the venv, not its Python symlink into the system.
+                venv = launcher.parent.parent.resolve()
+                if venv.parent == versions:
+                    active.add(venv)
     except OSError:
-        return
-    for c in children:
-        if c.name.startswith("."):
-            continue
-        if Path(os.path.realpath(c)) in keep_real:
-            continue
-        shutil.rmtree(c, ignore_errors=True)
+        return None
+    return active
+
+
+def _lock_file(layout: Layout) -> Path:
+    return layout.versions / ".update.lock"
+
+
+@asynccontextmanager
+async def _hold_update_lock(layout: Layout):
+    """Serialize downloads and venv changes across profiles sharing this root."""
+    import fcntl
+
+    layout.versions.mkdir(parents=True, exist_ok=True)
+    with _lock_file(layout).open("a+b") as lock:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                await asyncio.sleep(IDLE_POLL_S)
+        yield  # File close (or exec) releases the lock.
+
+
+def prune(layout: Layout, keep: set[Path]) -> None:
+    """Drop unused versions other than the current and rollback versions."""
+    import fcntl
+
+    try:
+        with _lock_file(layout).open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            keep_real = {Path(os.path.realpath(k)) for k in keep}
+            active = _running_versions(layout)
+            if active is None:
+                return  # Don't remove a possibly live sibling's environment.
+            keep_real.update(active)
+            for child in layout.versions.iterdir():
+                if not child.name.startswith(".") and child.resolve() not in keep_real:
+                    shutil.rmtree(child, ignore_errors=True)
+    except OSError:
+        return  # Another profile may be installing; defer this cleanup.
 
 
 # ── state across restarts ────────────────────────────────────────────────────
@@ -759,14 +812,32 @@ class BridgeUpdater:
             return "not_in_rollout"
         assert self.layout is not None
         self.target = m["version"]
+        async with _hold_update_lock(self.layout):
+            return await self._activate_signed_release(self.layout, m, cur)
+
+    async def _activate_signed_release(self, layout: Layout, m: dict, cur: str) -> str:
+        target = layout.versions / m["version"]
+        if layout.root.is_symlink() and layout.root.resolve() == target.resolve():
+            # Another profile already staged this verified release. Rejoin
+            # the stable path when idle rather than trying to install over it.
+            self.state = "waiting_idle"
+            await self.wait_idle()
+            if layout.root.resolve() != target.resolve() or not target.is_dir():
+                raise UpdateError("shared_install_changed")
+            self.state = "restarting"
+            self._record(f"restarting_shared:{cur}->{m['version']}")
+            logger.info("Herald Bridge %s already installed; restarting this tunnel from %s",
+                        m["version"], cur)
+            self._restart(layout)
+            return "restarting"
         self.state = "downloading"
         wheel = await self._download(m)
         self.state = "installing"
-        new_venv = await asyncio.to_thread(self._stager, self.layout, m, wheel)
+        new_venv = await asyncio.to_thread(self._stager, layout, m, wheel)
         self.state = "waiting_idle"
         await self.wait_idle()
         self.state = "restarting"
-        previous = swap(self.layout, new_venv, from_version=cur)
+        previous = swap(layout, new_venv, from_version=cur)
         st = load_state(self.state_file)
         st["pending"] = {"from_version": cur, "from_path": str(previous),
                          "to_version": m["version"], "to_path": str(new_venv),
@@ -775,7 +846,7 @@ class BridgeUpdater:
         save_state(st, self.state_file)
         logger.info("Herald Bridge %s installed (was %s); restarting the tunnel",
                     m["version"], cur)
-        self._restart(self.layout)
+        self._restart(layout)
         return "restarting"
 
     def _record(self, result: str) -> None:
