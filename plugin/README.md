@@ -146,6 +146,15 @@ from this tunnel (`herald_relay/local_files.py`), never from a public link:
 - By default, files over 200 MiB are not sent (`HERALD_FILE_MAX_MB`); the app says how big the file is.
 - Logs carry status and byte counts, never a path.
 
+## PDFs sent from chat
+
+Bridge 0.9.7 accepts original PDFs from the paired Herald session and saves
+them in the selected agent profile's `herald-inbox`. Uploads use the profile's
+existing key, never a public link. Files are capped at 8 MiB, and the inbox
+is bounded to 64 MiB and 512 files per profile. On later uploads, the Bridge
+cleans incomplete uploads older than one hour and originals older than seven
+days. Move a file out of the inbox if it needs to be kept longer.
+
 ## Architecture
 
 ```

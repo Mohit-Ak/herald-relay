@@ -9,6 +9,7 @@ import base64
 import io
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -328,3 +329,64 @@ async def test_post_not_allowed(hermes, box):
     s, _ = await local_files.handle("POST", "/_herald/file", {"Authorization": "Bearer default-key"},
                                     {}, hermes_url=hermes, hermes_home=hh)
     assert s == 405
+
+
+async def test_inbox_delivers_original_to_named_profile_and_retries_safely(hermes, box, monkeypatch):
+    from herald_relay import local_inbox, tunnel_cli
+    from herald_relay.relay_client import HeraldRelayClient
+
+    _, hh, _ = box
+    monkeypatch.setattr(tunnel_cli, "HERMES_HOME", hh)
+    client = HeraldRelayClient.__new__(HeraldRelayClient)
+    client.local_hermes_url = hermes
+    path = "/p/work/_herald/inbox"
+    assert is_local_door(path)
+    step = local_inbox.CHUNK_BYTES
+    original = b"%PDF-1.7\n" + os.urandom(step + 20)
+    transfer = "ab" * 16
+
+    def piece(offset):
+        return {"id": transfer, "size": len(original), "offset": offset,
+                "b64": base64.b64encode(original[offset:offset + step]).decode()}
+
+    # Check the original caller key, not the default profile's key.
+    wrong = {"Authorization": "Bearer default-key"}
+    assert (await client.screen_request("PUT", path, wrong, piece(0)))[0] == 401
+    assert not (hh / "profiles" / "work" / "herald-inbox").exists()
+    headers = {"Authorization": "Bearer work-key"}
+    assert (await client.screen_request("PUT", path, headers, piece(step)))[0] == 409
+    # Edge passes the JSON body as a string; SSE passes it as an object.
+    first = await client.screen_request("PUT", path, headers, json.dumps(piece(0)))
+    assert first == (200, {"offset": step})
+    assert await client.screen_request("PUT", path, headers, piece(0)) == first
+    status, response = await client.screen_request("PUT", path, headers, piece(step))
+    published = Path(response["path"])
+    assert status == 200 and response["offset"] == len(original)
+    assert published.parent.parent == hh / "profiles" / "work" / "herald-inbox"
+    assert published.read_bytes() == original
+    assert stat.S_IMODE(published.stat().st_mode) == 0o600
+    assert await client.screen_request("PUT", path, headers, piece(step)) == (status, response)
+
+
+async def test_inbox_refuses_bad_upload_and_limits_storage(hermes, box, monkeypatch):
+    from herald_relay import local_inbox
+
+    _, hh, _ = box
+    headers = {"Authorization": "Bearer default-key"}
+    raw = b"%PDF-1.7\nfixture"
+    data = {"id": "cd" * 16, "offset": 0, "size": len(raw), "b64": base64.b64encode(raw).decode()}
+
+    async def call(payload):
+        return await local_inbox.handle("PUT", "/_herald/inbox", headers, payload,
+                                        hermes_url=hermes, hermes_home=hh)
+
+    assert (await call({**data, "id": "../settings"}))[0] == 400
+    assert (await call({**data, "b64": base64.b64encode(b"x" * len(raw)).decode()}))[0] == 400
+    monkeypatch.setattr(local_inbox, "_QUOTA_FILES", 1)
+    status, ans = await call(data)
+    assert status == 200
+    assert (await call({**data, "id": "ef" * 16}))[0] == 507
+    path = Path(ans["path"])
+    os.utime(path, (1, 1))
+    assert (await call({**data, "id": "ef" * 16}))[0] == 200
+    assert not path.exists()
